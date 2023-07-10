@@ -7,6 +7,7 @@ library(rlang)
 library(openxlsx)
 library(dplyr)
 library(ggplot2)
+library(scales)
 library(fs)
 library(ggstatsplot)
 
@@ -38,7 +39,7 @@ tb_p1 <-
     MW = `MW [kDa]`,
     pI = `calc. pI`,
     sample_IMBS = `Abundance: F8: Sample, IMBS`,
-    sample_STD = `Abundance: F10: Sample, STD`,
+    sample_STD = `Abundance: F10: Sample, STD`
   ) %>%
   tidyr::pivot_longer(
     cols = starts_with("sample_"),
@@ -65,11 +66,11 @@ p1 <-
     guide = guide_legend(override.aes = list(alpha = 1, stroke = 1))
   ) +
   scale_alpha_manual(values = c("IMBS" = 0.5, "STD" = 0.385)) +
-  facet_grid(rows = vars(group)) +
+  # facet_grid(rows = vars(group)) +
   theme_bw()
 p1
 ggsave(
-  p1, filename = path(a$pdo, "20230606_bubble_cho.pdf"),
+  p1, filename = path(a$pdo, "20230606_bubble_cho_overlay.pdf"),
   width = 8, height = 4.5, scale = 1.5
 )
 
@@ -128,6 +129,42 @@ ggsave(
   height = 8, width = 6
 )
 
+## p1 new ----
+
+tb_p1_new <-
+  tb_p1_ori %>%
+  transmute(
+    MW = `MW [kDa]`,
+    pI = `calc. pI`,
+    abd_ratio = `Abundance Ratio: (IMBS) / (STD)`
+  ) %>%
+  filter(!is.na(abd_ratio)) %>%
+  mutate(
+    # group = stringr::str_replace(group, "sample_", ""),
+    log2_abundance = log2(abd_ratio),
+    log10_abundance = log10(abd_ratio),
+    log10_MW = log10(MW)
+  )
+p1_new_n2pos <- ggstatsplot::gghistostats(
+  # tb_p1_new %>% filter(log10_abundance != -2),
+  tb_p1_new,
+  x = log10_abundance,
+  binwidth = 0.05
+)
+ggsave(
+  p1_new_n2pos, filename = path(a$pdo, "20230606_ratio_histo.pdf"),
+  width = 10, height = 4
+)
+p1_new_n2neg <- ggstatsplot::gghistostats(
+  tb_p1_new %>% filter(log10_abundance != -2),
+  x = log10_abundance,
+  binwidth = 0.05
+)
+ggsave(
+  p1_new_n2neg, filename = path(a$pdo, "20230606_ratio_histo_no0.01.pdf"),
+  width = 10, height = 4
+)
+
 ## p2 ----
 
 tb_p2_ori <-
@@ -166,11 +203,11 @@ p2 <-
     guide = guide_legend(override.aes = list(alpha = 1, stroke = 1))
   ) +
   scale_alpha_manual(values = c("IMBS" = 0.5, "STD" = 0.385)) +
-  facet_grid(rows = vars(group)) +
+  # facet_grid(rows = vars(group)) +
   theme_bw()
 p2
 ggsave(
-  p2, filename = path(a$pdo, "20230606_bubble_293T.pdf"),
+  p2, filename = path(a$pdo, "20230606_bubble_293T_overlay.pdf"),
   width = 8, height = 4.5, scale = 1.5
 )
 
@@ -247,12 +284,12 @@ p3 <-
     labels = scales::label_number(scale_cut = cut_short_scale()),
     guide = guide_legend(override.aes = list(alpha = 1, stroke = 1))
   ) +
-  scale_alpha_manual(values = c("F151" = 0.5, "F152" = 0.385)) +
-  facet_grid(rows = vars(group)) +
+  scale_alpha_manual(values = c("F151" = 0.75, "F152" = 0.585)) +
+  # facet_grid(rows = vars(group)) +
   theme_bw()
 p3
 ggsave(
-  p3, filename = path(a$pdo, "20230606_bubble_p3.pdf"),
+  p3, filename = path(a$pdo, "20230606_bubble_p3_overlay.pdf"),
   width = 8, height = 4.5, scale = 1.5
 )
 
