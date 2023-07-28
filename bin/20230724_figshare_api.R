@@ -3,6 +3,11 @@
 # All available data from this artical:
 # https://www.nature.com/articles/s41592-021-01141-3
 
+# run this script in background of host server
+# docker exec -d -u "$(id -u):$(id -g)" \
+#     r-dev_4.1.3-suna-8788 \
+#     bash -c "Rscript ~/proj/tmp_work/20230724_figshare_api.R"
+
 consite <- "/data1/suna/proj/nmethod_benchmarking_2021"
 R_proj <- "~/proj/tmp_work"
 # dir.create(consite, recursive = TRUE, mode = "0775")
@@ -44,15 +49,20 @@ tb_files <-
       httr::GET() %>%
       httr::content() %>%
       purrr::map_dfr(.f = ~ as_tibble(.))
-  ) %>%
-  mutate(
-    destfile = path(pdo, name) %>% path_rel()
   )
+tb_files <-
+  tb_files %>%
+  mutate(
+    destfile = path(pdo, name) %>% path_rel(),
+    md5_local = tools::md5sum(destfile),
+    md5_checked = md5_local == supplied_md5
+  )
+tb_wip <- tb_files %>% filter(is.na(md5_checked) | !md5_checked)
 
-future::plan(multisession, workers = 8)
+future::plan(multisession, workers = 13)
 furrr::future_walk2(
-  .x = tb_files$id,
-  .y = tb_files$destfile,
+  .x = tb_wip$id,
+  .y = tb_wip$destfile,
   .f = ~
     httr::GET(
       url = glue("https://api.figshare.com/v2/file/download/{.x}"),
