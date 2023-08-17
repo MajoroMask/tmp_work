@@ -231,6 +231,7 @@ p <-
     ncol = 3,
     scales = "free"
   ) +
+  theme_bw() +
   labs(
     x = "AA position",
     y = "Depth"
