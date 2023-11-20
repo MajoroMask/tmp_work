@@ -14,7 +14,8 @@ setwd(a$pwd)
 a$pdi <- path("./tmp/coverage/")
 a$pdo <- path("./tmp/coverage_formatted") %>% dir_create()
 
-a$samples <- c("PPV5_E6_K", "293_PPV5_E6_K", "293_K")
+# a$samples <- c("PPV5_E6_K", "293_PPV5_E6_K", "293_K")
+a$samples <- c("293T_PPV5_E6.1")
 
 x <- purrr::map(
   .x = a$samples,
@@ -38,14 +39,14 @@ x <- purrr::map(
       vroom::vroom_write(file = path_bincov_out, append = TRUE)
 
     # covhist
-    path_covhist_in <-
-      path(pdi_smp, glue::glue("{smp}_covhist.txt")) %>%
-      path_real()
-    path_covhist_out <-
-      path(pdo_smp, glue::glue("{smp}_covhist.txt")) %>%
-      file_create()
-    tb_covhist <- vroom::vroom(path_covhist_in, show_col_types = FALSE)
-    file_copy(path_covhist_in, path_covhist_out, overwrite = TRUE)
+    # path_covhist_in <-
+    #   path(pdi_smp, glue::glue("{smp}_covhist.txt")) %>%
+    #   path_real()
+    # path_covhist_out <-
+    #   path(pdo_smp, glue::glue("{smp}_covhist.txt")) %>%
+    #   file_create()
+    # tb_covhist <- vroom::vroom(path_covhist_in, show_col_types = FALSE)
+    # file_copy(path_covhist_in, path_covhist_out, overwrite = TRUE)
 
     # covstats, rpkm & scafstats
     those <- c("covstats", "rpkm", "scafstats")

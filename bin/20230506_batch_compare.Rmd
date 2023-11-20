@@ -48,7 +48,12 @@ rmarkdown::render(
 ## Global options
 
 a$font_family <- "sarasa-term-sc-nerd-regular"
-a$font_regular <- path(a$pdi, "sarasa-term-sc-nerd-regular.ttf")
+a$font_regular <- 
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>% 
+  path_real()
 sysfonts::font_add(
   family = a$font_family,
   regular = a$font_regular
@@ -87,9 +92,7 @@ my_theme <-
 old_theme <- theme_set(my_theme)
 ```
 
-# 0. 数据概况
-
-```{r sample_table}
+```{r utils}
 #' gsa
 #'
 #' group_by() %>% summarise() %>% arrange()
@@ -110,7 +113,11 @@ gsa <- function(.data, ..., .sort = TRUE) {
 }
 
 pipe_end <- function(x) x
+```
 
+# 0. 数据
+
+```{r sample_table}
 tb_samples <- 
   path(a$pdi, "samples.tsv") %>% 
   vroom(show_col_types = FALSE) %>% 
