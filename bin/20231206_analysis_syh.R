@@ -310,30 +310,6 @@ for (i in 1:2) {
   )
 }
 
-## group analysis ----
-
-### data ----
-
-{
-  wb <- loadWorkbook(xlsxFile = path(a$pdi, "data.xlsx"))
-  preset_colnames <-
-    c("acc", "desc", "mark", "n_unipep", "n_aa", "mw", "pi", "m_mean")
-  tb_data_ori <-
-    purrr::map_dfr(
-      .x = names(wb),
-      .f = ~
-        readWorkbook(wb, sheet = .x) %>%
-        set_names(nm = preset_colnames) %>%
-        as_tibble() %>%
-        mutate(sample = .x, .before = 1) %>%
-        mutate(
-          pct_m = m_mean / sum(m_mean),
-          in_top_pct = pct_m >= 0.01
-          # in_top_pct = pct_m >= 0.01
-        )
-    )
-}
-
 ### cor ----
 
 the_three <- c("GOI4-MS-P1-F-Par", "GOI4-MS-P1-F-Sup", "GOI4-MS-P1-F-Mix")
@@ -372,7 +348,114 @@ m_cov <-
   na.omit()
 cor(m_cov)
 
-### heatmap ----
+
+## group analysis ----
+
+### data ----
+
+{
+  wb <- loadWorkbook(xlsxFile = path(a$pdi, "data.xlsx"))
+  preset_colnames <-
+    c("acc", "desc", "mark", "n_unipep", "n_aa", "mw", "pi", "m_mean")
+  tb_data_ori <-
+    purrr::map_dfr(
+      .x = names(wb),
+      .f = ~
+        readWorkbook(wb, sheet = .x) %>%
+        set_names(nm = preset_colnames) %>%
+        as_tibble() %>%
+        mutate(sample = .x, .before = 1) %>%
+        mutate(
+          pct_m = m_mean / sum(m_mean),
+          in_top_pct = pct_m >= 0.01
+          # in_top_pct = pct_m >= 0.01
+        )
+    )
+}
+
+## cor ----
+
+the_three <- c("GOI4-MS-P1-F-Par", "GOI4-MS-P1-F-Sup", "GOI4-MS-P1-F-Mix")
+# the_three <- c("GOI4-MS-P3-F-Par", "GOI4-MS-P3-F-Sup", "GOI4-MS-P3-F-Mix")
+
+tb_cov <-
+  tb_data_ori %>%
+  filter(sample %in% the_three) %>%
+  mutate(
+    sample_short = str_replace(sample, ".*-", ""),
+    .after = sample
+  ) %>%
+  # select(sample_short, acc, m_mean) %>%
+  select(sample_short, acc, pct_m, in_top_pct) %>%
+  pivot_wider(
+    id_cols = acc,
+    names_from = sample_short,
+    # values_from = m_mean
+    values_from = c(pct_m, in_top_pct)
+  ) %>%
+  rowwise() %>%
+  mutate(any_sample = any(c_across(starts_with("in_top_pct_")))) %>%
+  ungroup() %>%
+  filter(any_sample) %>%
+  pipe_end()
+m_cov <-
+  tb_cov %>%
+  select(acc, starts_with("pct_m_")) %>%
+  rename_with(
+    .cols = starts_with("pct_m_"),
+    .fn = ~ str_replace(.x, "pct_m_", "")
+  ) %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames(var = "acc") %>%
+  as.matrix() %>%
+  na.omit()
+cor(m_cov)
+
+### update: cor on penta ----
+
+tb_cov <-
+  tb_data_ori %>%
+  filter(sample %in% the_five) %>%
+  mutate(
+    sample_short = str_replace(sample, "GOI4-MS-(.*)-F-Par", "\\1"),
+    .after = sample
+  ) %>%
+  mutate(in_top_pct = pct_m >= 0) %>%
+  mutate(value = pct_m) %>%
+  select(sample_short, acc, value, in_top_pct) %>%
+  pivot_wider(
+    id_cols = acc,
+    names_from = sample_short,
+    values_from = c(value, in_top_pct),
+    values_fill = 0
+  ) %>%
+  rowwise() %>%
+  mutate(
+    any_sample =
+      any(c_across(starts_with("in_top_pct_")), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  filter(any_sample) %>%
+  pipe_end()
+m_cov <-
+  tb_cov %>%
+  select(acc, starts_with("value_")) %>%
+  rename_with(
+    .cols = starts_with("value_"),
+    .fn = ~ str_replace(.x, "value_", "")
+  ) %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames(var = "acc") %>%
+  as.matrix() %>%
+  na.omit()
+cor(m_cov)
+
+readr::write_tsv(
+  cor(m_cov) %>% as.data.frame() %>% tibble::rownames_to_column(var = "acc"),
+  file = path(a$pdo, "m_cov.tsv")
+)
+
+## heatmap ----
 
 the_three <- c("GOI4-MS-P1-F-Par", "GOI4-MS-P1-F-Sup", "GOI4-MS-P1-F-Mix")
 
@@ -413,7 +496,7 @@ pheatmap::pheatmap(
   m_heatmap
 )
 
-### barplot first take ----
+## barplot first take ----
 
 # the_three <- c("GOI4-MS-P1-F-Par", "GOI4-MS-P1-F-Sup", "GOI4-MS-P1-F-Mix")
 the_three <- c("GOI4-MS-P3-F-Par", "GOI4-MS-P3-F-Sup", "GOI4-MS-P3-F-Mix")
@@ -454,7 +537,7 @@ p_bar <- ggstatsplot::ggbarstats(
 # ggsave(p_bar, filename = path(a$pdo, "bar_P1.pdf"), height = 10, width = 8)
 ggsave(p_bar, filename = path(a$pdo, "bar_P3.pdf"), height = 10, width = 8)
 
-### barplot ----
+## barplot ----
 
 # the_three <- c("GOI4-MS-P1-F-Par", "GOI4-MS-P1-F-Sup", "GOI4-MS-P1-F-Mix")
 the_three <- c("GOI4-MS-P3-F-Par", "GOI4-MS-P3-F-Sup", "GOI4-MS-P3-F-Mix")
@@ -657,5 +740,83 @@ p_facet_bar_others <-
 ggsave(
   p_facet_bar_others,
   filename = path(a$pdo, "facet_bar_others.pdf"),
+  width = 20, height = 4
+)
+
+### update: facet bar for the five ----
+
+the_seven_pros <-
+  c("Gag", "Integrase", "Protease", "Rev", "Reverse", "RNase", "VSV-G")
+enlist_pros <-
+  tb_data_ori %>%
+  filter(
+    sample %in% the_five,
+    pct_m >= 0.01
+  ) %>%
+  pull(acc) %>%
+  unique() %>%
+  union(the_seven_pros) %>%
+  pipe_end()
+
+tb_facet_bar <-
+  tb_data_ori %>%
+  filter(
+    sample %in% the_five,
+    acc %in% enlist_pros
+  ) %>%
+  mutate(
+    sample_short =
+      str_replace(sample, "GOI4-MS-(.*)-F-Par", "\\1") %>%
+      fct_rev(),
+    grp = sample_short
+  ) %>%
+  arrange(desc(pct_m)) %>%
+  mutate(acc = fct_inorder(acc))
+
+p_facet_bar_the_seven <-
+  ggplot(tb_facet_bar %>% filter(acc %in% the_seven_pros)) +
+  geom_bar(
+    aes(x = pct_m, y = sample_short, fill = sample_short),
+    stat = "identity"
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    # rows = vars(grp),
+    cols = vars(acc),
+    scales = "free"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(x = NULL, y = NULL)
+ggsave(
+  p_facet_bar_the_seven,
+  filename = path(a$pdo, "facet_bar_the_seven_penta.pdf"),
+  width = 18, height = 4
+)
+
+p_facet_bar_others <-
+  ggplot(tb_facet_bar %>% filter(!acc %in% the_seven_pros)) +
+  geom_bar(
+    aes(x = pct_m, y = sample_short, fill = sample_short),
+    stat = "identity"
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    # rows = vars(grp),
+    cols = vars(acc),
+    scales = "free"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(x = NULL, y = NULL)
+ggsave(
+  p_facet_bar_others,
+  filename = path(a$pdo, "facet_bar_others_penta.pdf"),
   width = 20, height = 4
 )
