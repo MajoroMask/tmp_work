@@ -287,7 +287,8 @@ read_krakentools_combined_report <- function(input) {
       sample = 
         fs::path_file(path_input) %>% 
         as.character() %>% 
-        str_replace("_kraken2_report.txt$", "")
+        # str_replace("_kraken2_report.txt$", "")
+        str_replace("_pe_.*$", "")
     )
   tb_data <- 
     vroom::vroom(
@@ -661,7 +662,6 @@ calculate_pair_seq_sim <- function(twoid,
       sim <- s12 / sqrt(s11 * s22)
     }
   }
-  
   sim
 }
 ```
@@ -677,7 +677,7 @@ l_bvdv_genome <-
       as.character() %>% 
       `names<-`(.y)
   )
-m_sim <- get_dna_similarity(l_bvdv_genome, cores = 8)
+m_sim <- get_dna_similarity(l_bvdv_genome, cores = 1)
 colnames(m_sim) <- tb_bvdv_list$name_short
 rownames(m_sim) <- tb_bvdv_list$name_short
 ```
@@ -1587,19 +1587,19 @@ ggbetweenstats(
 一些结论：
 
 - kraken2的结果是可以做出数量级的梯度的前提：
-  - 数据量足够。
-  - 湿实验质量较好，条件稳定，常见污染相对可控。
+- 数据量足够。
+- 湿实验质量较好，条件稳定，常见污染相对可控。
 - `0915`批次和`0825/1205`，`1110/1127`，以及`1007`批次使用的`BVDV`菌株可能不是同一种。目前来看，前者基因组序列可能更接近`BVDV1`，而后面这几批的菌株很可能是`BVDV VEDEVAC`。
 - 同一个病毒的不同亚型/菌株间，参考基因组的序列差异可能比我们想象的更大。
 - reads质控使用更严格的读长cutoff后，序列比对的比对质量更稳定。
-  - 有理由相信对其它后续分析也会有类似影响。
+- 有理由相信对其它后续分析也会有类似影响。
 - 应该在pipeline的序列比对环节增加质控。
 
 一些建议：
 
 - 没有必要、也不应该在kraken2库中增加过多的病毒序列。
-  - 目前使用的kraken2库，其病毒序列基于`RefSeq viral`，所以是经过相当程度的去重的。对kraken2而言，添加过多的高序列相似度序列进行建库只会降低其灵敏度。
-  - 条件理想的话，现在的数据库已足够看到`# reads`和`% reads`的梯度。
+- 目前使用的kraken2库，其病毒序列基于`RefSeq viral`，所以是经过相当程度的去重的。对kraken2而言，添加过多的高序列相似度序列进行建库只会降低其灵敏度。
+- 条件理想的话，现在的数据库已足够看到`# reads`和`% reads`的梯度。
 - 如果需要在数值上更精确，应该更多参考序列比对的结果而非taxonomy profiling结果。
 - 如果目的是关注特定病毒，需要知道确切的species/senotype的话，我们需要获得足够好的序列比对结果。这意味着可能需要对一个病毒的多个参考基因组并行比对。
 
@@ -1607,6 +1607,639 @@ ggbetweenstats(
 
 - 检测下限：目前的分析看到一些影响检测下限的因素，但具体该用什么指标如何计算还不确定。
 - 比对的质控标准。如果需要增加比对质控，其卡值标准还需要摸索。
+
+# 3 update 2023-12-18
+
+考虑到之前数据分析的不足，使用更新之后的pipeline重新分析了上述所有样品。
+
+<!-- - 统一的质控参数，最小reads长度80 -->
+<!-- - 更新的kraken2 reference：在2023-09-26的`RefSeq viral`基础上增加`BVDV VEDEVAC`的参考基因组序列 -->
+<!--   - 更新之后的数据库，Pestivirus属的minimizer -->
+<!-- - -->
+
+<!-- ```{r tbMinimizer} -->
+
+<!-- ``` -->
+
+
+## 3.1 重新分析kraken2结果
+
+```{r changeBaseToBvdvAllStar}
+a$ppl_pwd <- path("/data1/suna/work/mag_bvdv_allstar/")
+a$ppl_outdir <- path(a$ppl_pwd, "outdir_test01")
+path_krakentool_combined_report <- 
+  path(a$ppl_outdir, "TaxProfile", "kraken2", 
+       "kraken2_20231215_virus_bvdv_combined_reports.txt") %>% 
+  fs::path_abs()
+```
+
+```{r readKraken2DataBvdvAllStar}
+tb_samplesheet <- 
+  vroom(
+    path(a$ppl_pwd, "samplesheet_add_batch.csv"),
+    show_col_types = FALSE
+  ) %>% 
+  mutate(
+    sample_path = sample,
+    is_ntc = str_detect(sample, "NTC"),
+    level = 
+      case_when(
+        str_detect(sample, "BVDV_\\d?E\\d_") ~ 
+          str_replace(sample, ".*BVDV_\\d?(E\\d)_.*", "\\1"),
+        str_detect(sample, "NTC") ~ "NTC",
+        .default = "Non-BVDV samples"
+      ) %>% 
+      as.factor()
+  ) %>% 
+  arrange(batch, is_ntc, sample) %>% 
+  mutate(sample = fct_inorder(sample))
+
+# Reads QC
+tb_fastp <- 
+  path(a$ppl_outdir, "QC_shortreads", "fastp_results.csv") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  select(
+    sample = sample_id, 
+    n_raw_reads = `summary--before_filtering.total_reads`,
+    n_raw_base = `summary--before_filtering.total_bases`,
+    n_clean_reads = `summary--after_filtering.total_reads`,
+    n_clean_bases = `summary--after_filtering.total_bases`
+  ) %>% 
+  mutate(
+    across(
+      .cols = starts_with("n_"),
+      .fns = log10,
+      .names = "log10_{.col}"
+    )
+  )
+
+# kraken2
+tb_kraken_input <- 
+  path_krakentool_combined_report %>% 
+  read_krakentools_combined_report()
+tb_tax_anno_kraken <- get_taxinfo_table(
+  tax_id = tb_kraken_input$taxid,
+  path_sql_ncbi = a$path_sql_ncbi,
+  path_merged_dmp = fs::path(a$pd_taxdump, "merged.dmp"),
+  reorder = FALSE
+)
+tb_kraken_final <- 
+  tb_kraken_input %>% 
+  rename(name_ori = name) %>% 
+  left_join(tb_tax_anno_kraken, by = c("taxid" = "tax_id")) %>% 
+  relocate(tax_id_updated, .after = taxid) %>% 
+  relocate(
+    name, rank, lineage_tax_id, lineage_name, lineage_rank,
+    .after = name_ori
+  )
+
+# 画图用其一
+tb_tmp <- 
+  tb_kraken_final %>% 
+  slice(1, 2) %>% 
+  select(name, ends_with("_all")) %>% 
+  select(-tot_all) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "reads"
+  ) %>% 
+  pivot_wider(
+    id_cols = sample, 
+    names_from = "name",
+    values_from = "reads"
+  ) %>% 
+  mutate(sample = str_replace(sample, "_all", "")) %>% 
+  rename(classified = root) %>% 
+  mutate(
+    log10_classified = log10(classified),
+    log10_unclassified = log10(unclassified)
+  ) %>% 
+  mutate(
+    pct_classified = classified / (classified + unclassified),
+    pct_unclassified = unclassified / (classified + unclassified)
+  )
+tb_kraken_pct <- 
+  tb_samplesheet %>% 
+  select(sample, batch, level) %>% 
+  left_join(tb_tmp, by = "sample") %>% 
+  left_join(tb_fastp, by = "sample")
+
+# 画图用其二
+enlist_taxids <- c(11095, 11099, 221918, 67082, 28285, 0)
+tb_tmp <- 
+  tb_kraken_final %>% 
+  filter(taxid %in% enlist_taxids) %>% 
+  mutate(.index = factor(taxid, levels = enlist_taxids)) %>% 
+  arrange(.index) %>% 
+  select(-.index) %>% 
+  select(name, ends_with("_all")) %>% 
+  select(-tot_all) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "reads"
+  ) %>% 
+  mutate(sample = str_replace(sample, "_all", "")) %>% 
+  mutate(
+    name = 
+      case_match(
+        name,
+        "Pestivirus" ~ "Pestivirus",
+        "Bovine viral diarrhea virus 1" ~ "BVDV1",
+        "Bovine viral diarrhea virus VEDEVAC" ~ "BVDV VEDEVAC",
+        "BeAn 58058 virus" ~ "BAV",
+        "Human adenovirus 5" ~ "HAV5",
+        .default = name
+      ) %>% 
+      fct_inorder()
+  )
+tb_plot_pestivirus <- 
+  tb_tmp %>% 
+  left_join(tb_kraken_pct, by = "sample") %>% 
+  mutate(
+    classified_pct = reads / classified,
+    clean_pct = reads / (classified + unclassified)
+  )
+```
+
+画点图
+
+```{r}
+# ggbetweenstats(
+#   tb_kraken_pct %>% filter(level != "NTC"), 
+#   x = batch, 
+#   y = log10_n_clean_reads, 
+#   bf.message = FALSE, 
+#   pairwise.comparisons = FALSE
+# )
+# ggbetweenstats(
+#   tb_kraken_pct %>% filter(level != "NTC"), 
+#   x = level, 
+#   y = n_clean_reads, 
+#   bf.message = FALSE, 
+#   pairwise.comparisons = FALSE
+# )
+```
+
+再画点图
+
+```{r}
+p_kraken_count <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = log10(reads + 1), fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(y = sample, x = 0, label = reads),
+    hjust = 0, vjust = 0.5
+  ) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "# reads (log10)")
+# p_kraken_count
+```
+
+```{r}
+p_classified_pct <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = classified_pct, fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(
+      y = sample, x = 0, 
+      label = scales::percent(classified_pct, accuracy = 0.01)
+    ),
+    hjust = 0, vjust = 0.5
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "% to classified reads")
+# p_classified_pct
+```
+
+```{r}
+p_clean_pct <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = log10(clean_pct), fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(
+      y = sample, x = 0.05, 
+      label = scales::scientific(clean_pct)
+    ),
+    hjust = 0, vjust = 0.5
+  ) +
+  scale_x_continuous(expand = expansion(add = c(0.5, 2.5))) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "% to clean reads (log10)")
+# p_clean_pct
+```
+
+```{r}
+ggsave(
+  p_kraken_count, filename = path(a$pdo, "p_kraken_count_0.0.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_classified_pct, filename = path(a$pdo, "p_classified_pct_0.0.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_clean_pct, filename = path(a$pdo, "p_clean_pct_0.0.pdf"),
+  height = 25, width = 25
+)
+```
+
+### 3.1.1 把kraken2 confidence改成0.1呢？
+
+```{r changeBaseToBvdvAllStarKC0.1}
+a$ppl_pwd <- path("/data1/suna/work/mag_bvdv_allstar/")
+a$ppl_outdir <- path(a$ppl_pwd, "outdir_test02")
+path_krakentool_combined_report <- 
+  path(a$ppl_outdir, "TaxProfile", "kraken2", 
+       "kraken2_20231215_virus_bvdv_combined_reports.txt") %>% 
+  fs::path_abs()
+```
+
+```{r readKraken2DataBvdvAllStarKC0.1}
+tb_samplesheet <- 
+  vroom(
+    path(a$ppl_pwd, "samplesheet_add_batch.csv"),
+    show_col_types = FALSE
+  ) %>% 
+  mutate(
+    sample_path = sample,
+    is_ntc = str_detect(sample, "NTC"),
+    level = 
+      case_when(
+        str_detect(sample, "BVDV_\\d?E\\d_") ~ 
+          str_replace(sample, ".*BVDV_\\d?(E\\d)_.*", "\\1"),
+        str_detect(sample, "NTC") ~ "NTC",
+        .default = "Non-BVDV samples"
+      ) %>% 
+      as.factor()
+  ) %>% 
+  arrange(batch, is_ntc, sample) %>% 
+  mutate(sample = fct_inorder(sample))
+
+# Reads QC
+tb_fastp <- 
+  path(a$ppl_outdir, "QC_shortreads", "fastp_results.csv") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  select(
+    sample = sample_id, 
+    n_raw_reads = `summary--before_filtering.total_reads`,
+    n_raw_base = `summary--before_filtering.total_bases`,
+    n_clean_reads = `summary--after_filtering.total_reads`,
+    n_clean_bases = `summary--after_filtering.total_bases`
+  ) %>% 
+  mutate(
+    across(
+      .cols = starts_with("n_"),
+      .fns = log10,
+      .names = "log10_{.col}"
+    )
+  )
+
+# kraken2
+tb_kraken_input <- 
+  path_krakentool_combined_report %>% 
+  read_krakentools_combined_report()
+tb_tax_anno_kraken <- get_taxinfo_table(
+  tax_id = tb_kraken_input$taxid,
+  path_sql_ncbi = a$path_sql_ncbi,
+  path_merged_dmp = fs::path(a$pd_taxdump, "merged.dmp"),
+  reorder = FALSE
+)
+tb_kraken_final <- 
+  tb_kraken_input %>% 
+  rename(name_ori = name) %>% 
+  left_join(tb_tax_anno_kraken, by = c("taxid" = "tax_id")) %>% 
+  relocate(tax_id_updated, .after = taxid) %>% 
+  relocate(
+    name, rank, lineage_tax_id, lineage_name, lineage_rank,
+    .after = name_ori
+  )
+
+# 画图用其一
+tb_tmp <- 
+  tb_kraken_final %>% 
+  slice(1, 2) %>% 
+  select(name, ends_with("_all")) %>% 
+  select(-tot_all) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "reads"
+  ) %>% 
+  pivot_wider(
+    id_cols = sample, 
+    names_from = "name",
+    values_from = "reads"
+  ) %>% 
+  mutate(sample = str_replace(sample, "_all", "")) %>% 
+  rename(classified = root) %>% 
+  mutate(
+    log10_classified = log10(classified),
+    log10_unclassified = log10(unclassified)
+  ) %>% 
+  mutate(
+    pct_classified = classified / (classified + unclassified),
+    pct_unclassified = unclassified / (classified + unclassified)
+  )
+tb_kraken_pct <- 
+  tb_samplesheet %>% 
+  select(sample, batch, level) %>% 
+  left_join(tb_tmp, by = "sample") %>% 
+  left_join(tb_fastp, by = "sample")
+
+# 画图用其二
+enlist_taxids <- c(11095, 11099, 221918, 67082, 28285, 0)
+tb_tmp <- 
+  tb_kraken_final %>% 
+  filter(taxid %in% enlist_taxids) %>% 
+  mutate(.index = factor(taxid, levels = enlist_taxids)) %>% 
+  arrange(.index) %>% 
+  select(-.index) %>% 
+  select(name, ends_with("_all")) %>% 
+  select(-tot_all) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "reads"
+  ) %>% 
+  mutate(sample = str_replace(sample, "_all", "")) %>% 
+  mutate(
+    name = 
+      case_match(
+        name,
+        "Pestivirus" ~ "Pestivirus",
+        "Bovine viral diarrhea virus 1" ~ "BVDV1",
+        "Bovine viral diarrhea virus VEDEVAC" ~ "BVDV VEDEVAC",
+        "BeAn 58058 virus" ~ "BAV",
+        "Human adenovirus 5" ~ "HAV5",
+        .default = name
+      ) %>% 
+      fct_inorder()
+  )
+tb_plot_pestivirus <- 
+  tb_tmp %>% 
+  left_join(tb_kraken_pct, by = "sample") %>% 
+  mutate(
+    classified_pct = reads / classified,
+    clean_pct = reads / (classified + unclassified)
+  )
+```
+
+```{r}
+# ggbetweenstats(
+#   tb_kraken_pct %>% filter(level != "NTC"), 
+#   x = batch, 
+#   y = log10_n_clean_reads, 
+#   bf.message = FALSE, 
+#   pairwise.comparisons = FALSE
+# )
+# ggbetweenstats(
+#   tb_kraken_pct %>% filter(level != "NTC"), 
+#   x = level, 
+#   y = n_clean_reads, 
+#   bf.message = FALSE, 
+#   pairwise.comparisons = FALSE
+# )
+```
+
+再画点屌图
+
+```{r}
+p_kraken_count <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = log10(reads + 1), fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(y = sample, x = 0, label = reads),
+    hjust = 0, vjust = 0.5
+  ) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "# reads (log10)")
+# p_kraken_count
+```
+
+```{r}
+p_classified_pct <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = classified_pct, fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(
+      y = sample, x = 0, 
+      label = scales::percent(classified_pct, accuracy = 0.01)
+    ),
+    hjust = 0, vjust = 0.5
+  ) +
+  scale_x_continuous(labels = scales::percent) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "% to classified reads")
+# p_classified_pct
+```
+
+```{r}
+p_clean_pct <- 
+  tb_plot_pestivirus %>% 
+  filter(!is.na(batch)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(y = sample, x = log10(clean_pct), fill = level), 
+    stat = "identity"
+  ) +
+  geom_label(
+    aes(
+      y = sample, x = 0.05, 
+      label = scales::scientific(clean_pct)
+    ),
+    hjust = 0, vjust = 0.5
+  ) +
+  scale_x_continuous(expand = expansion(add = c(0.5, 2.5))) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(name),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme_bw() +
+  labs(x = "% to clean reads (log10)")
+# p_clean_pct
+```
+
+```{r}
+ggsave(
+  p_kraken_count, filename = path(a$pdo, "p_kraken_count_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_classified_pct, filename = path(a$pdo, "p_classified_pct_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_clean_pct, filename = path(a$pdo, "p_clean_pct_0.1.pdf"),
+  height = 25, width = 25
+)
+```
+
+# playground
+
+```{r}
+b <- new_environment()
+b$path_kraken_ref <- 
+  path("/data1/suna/data/taxprofiler_databases/kraken2/20231215_virus_bvdv")
+b$ppl_outdir <- path("/data1/suna/work/mag_bvdv_allstar/outdir_test02")
+
+b$path_sql_ncbi <- 
+  path("/data1/database/taxprofiler_databases/taxdump/NCBI.sql")
+taxizedb::tdb_cache$cache_path_set(full_path = fs::path_dir(b$path_sql_ncbi))
+b$pd_taxdump <- path("/data1/database/taxprofiler_databases/taxdump/")
+```
+
+```{r}
+tb_inspect <- 
+  path(b$path_kraken_ref, "inspect.txt") %>% 
+  vroom::vroom(
+    delim = "\t", 
+    col_names = c("pct", "mini_all", "mini_lvl", "rank", "id", "name"),
+    col_types = "ciicic",
+    trim_ws = FALSE
+  ) %>% 
+  select(id, name, mini_all, mini_lvl) %>% 
+  bind_rows(
+    tibble(
+      id = 0L,
+      name = "unclassified",
+      mini_all = 0L,
+      mini_lvl = 0L
+    ), 
+    .
+  )
+
+l_inputs <- 
+  path(b$ppl_outdir, "TaxProfile/kraken2/20231215_virus_bvdv") %>% 
+  dir_ls()
+l_ids <- 
+  l_inputs %>% 
+  fs::path_file() %>% 
+  str_replace("_pe_.*", "")
+tb_xit <- 
+  map2_dfr(
+    .x = l_inputs,
+    .y = l_ids,
+    .f = function(input_path, input_id) {
+      tb_output <- 
+        input_path %>% 
+        vroom::vroom(
+          delim = "\t", 
+          col_names = c(
+            "pct", "reads_all", "reads_lvl", 
+            "n_mini", "n_mini_uniq", "rank", "id", "name"
+          ),
+          col_types = "ciiiicic",
+          trim_ws = FALSE
+        ) %>% 
+        transmute(
+          id,
+          all = reads_all,
+          lvl = reads_lvl,
+          nmini = n_mini,
+          umini = n_mini_uniq,
+          sample = input_id
+        )
+      return(tb_output)
+    }
+  )
+tb_tax_anno <- 
+  get_taxinfo_table(
+    tax_id = unique(tb_xit$id),
+    path_sql_ncbi = b$path_sql_ncbi,
+    path_merged_dmp = fs::path(b$pd_taxdump, "merged.dmp"),
+    reorder = FALSE
+  ) %>% 
+  select(-name)
+tb_final <- 
+  tb_inspect %>% 
+  filter(id %in% tb_xit$id) %>% 
+  left_join(tb_tax_anno, by = c("id" = "tax_id")) %>% 
+  left_join(
+    tb_xit %>% 
+      pivot_wider(
+        id_cols = id,
+        names_from = sample,
+        values_from = c(all, lvl, nmini, umini),
+        names_glue = "{sample}_{.value}",
+        names_vary = "slowest",
+        values_fill = 0L
+      ),
+    by = "id"
+  )
+vroom::vroom_write(
+  tb_final, 
+  file = "/data1/suna/work/mag_bvdv_allstar/outdir_test02/TaxProfile/kraken2/xit.csv",
+  delim = ","
+)
+```
+
+
 
 # `sessionInfo`
 
