@@ -2151,28 +2151,33 @@ b$ppl_outdir <- path("/data1/suna/work/mag_bvdv_allstar/outdir_test02")
 b$path_sql_ncbi <- 
   path("/data1/database/taxprofiler_databases/taxdump/NCBI.sql")
 taxizedb::tdb_cache$cache_path_set(full_path = fs::path_dir(b$path_sql_ncbi))
-b$pd_taxdump <- path("/data1/database/taxprofiler_databases/taxdump/")
+# b$pd_taxdump <- path("/data1/database/taxprofiler_databases/taxdump/")
 ```
 
 ```{r}
-tb_inspect <- 
-  path(b$path_kraken_ref, "inspect.txt") %>% 
-  vroom::vroom(
-    delim = "\t", 
-    col_names = c("pct", "mini_all", "mini_lvl", "rank", "id", "name"),
-    col_types = "ciicic",
-    trim_ws = FALSE
-  ) %>% 
-  select(id, name, mini_all, mini_lvl) %>% 
-  bind_rows(
-    tibble(
-      id = 0L,
-      name = "unclassified",
-      mini_all = 0L,
-      mini_lvl = 0L
-    ), 
-    .
-  )
+# tb_inspect <- 
+#   path(b$path_kraken_ref, "inspect.txt") %>% 
+#   vroom::vroom(
+#     delim = "\t", 
+#     col_names = c("pct", "mini_all", "mini_lvl", "rank", "id", "name"),
+#     col_types = "ciicic",
+#     trim_ws = FALSE
+#   ) %>% 
+#   select(id, name, rank_short = rank, mini_all, mini_lvl) %>% 
+#   bind_rows(
+#     tibble(
+#       id = 0L,
+#       name = "unclassified",
+#       mini_all = 0L,
+#       mini_lvl = 0L
+#     ), 
+#     .
+#   )
+tb_krakentools_combined <- 
+  path(b$ppl_outdir, "TaxProfile/kraken2", 
+       "kraken2_20231215_virus_bvdv_combined_reports.txt") %>% 
+  read_krakentools_combined_report() %>% 
+  select(id = taxid, name, rank = lvl_type)
 
 l_inputs <- 
   path(b$ppl_outdir, "TaxProfile/kraken2/20231215_virus_bvdv") %>% 
@@ -2199,6 +2204,8 @@ tb_xit <-
         ) %>% 
         transmute(
           id,
+          name,
+          rank,
           all = reads_all,
           lvl = reads_lvl,
           nmini = n_mini,
@@ -2208,18 +2215,17 @@ tb_xit <-
       return(tb_output)
     }
   )
-tb_tax_anno <- 
-  get_taxinfo_table(
-    tax_id = unique(tb_xit$id),
-    path_sql_ncbi = b$path_sql_ncbi,
-    path_merged_dmp = fs::path(b$pd_taxdump, "merged.dmp"),
-    reorder = FALSE
-  ) %>% 
-  select(-name)
+# tb_tax_anno <- 
+#   get_taxinfo_table(
+#     tax_id = tb_xit$id %>% unique(),
+#     path_sql_ncbi = b$path_sql_ncbi,
+#     path_merged_dmp = fs::path(b$pd_taxdump, "merged.dmp"),
+#     reorder = FALSE
+#   ) %>% 
+#   select(-name)
 tb_final <- 
-  tb_inspect %>% 
-  filter(id %in% tb_xit$id) %>% 
-  left_join(tb_tax_anno, by = c("id" = "tax_id")) %>% 
+  tb_krakentools_combined %>% 
+  # left_join(tb_tax_anno, by = c("id" = "tax_id")) %>% 
   left_join(
     tb_xit %>% 
       pivot_wider(
@@ -2231,7 +2237,97 @@ tb_final <-
         values_fill = 0L
       ),
     by = "id"
+  ) %>% 
+  # relocate(rank_short, .after = rank) %>% 
+  # rename(id_updated = tax_id_updated) %>% 
+  # relocate(id_updated, .after = id) %>% 
+  pipe_end()
+
+tb_test <- 
+  tb_final %>% 
+  mutate(
+    indent = str_replace(name, "(\\s*)\\w+.*", "\\1") %>% str_length(),
+    indent_before = c(0, lag(indent) %>% tail(-1)),
+    indent_after = c(lead(indent) %>% head(-1), 0),
+    # is_tree_end = indent >= indent_before & indent >= indent_after,
+    is_tree_end = indent >= indent_after,
+    .after = name
+  ) %>% 
+  rowwise() %>% 
+  mutate(
+    total_all = sum(c_across(ends_with("_all"))),
+    total_lvl = sum(c_across(ends_with("_lvl"))),
+    .after = lineage_rank
+  ) %>% 
+  ungroup()
+tb_reorder <- 
+  tb_test %>% 
+  slice(-1) %>% 
+  filter(is_tree_end) %>% 
+  arrange(desc(total_lvl)) %>% 
+  pull(id) %>% 
+  purrr::map(
+    .f = function(the_id) {
+      tb_out <- 
+        tb_test %>% 
+        slice(2:which(tb_test$id == the_id)) %>% 
+        filter(indent <= tail(indent, n = 1)) %>% 
+        group_by(indent) %>% 
+        slice_tail(n = 1) %>% 
+        ungroup() %>% 
+        select(id, name, rank_short, indent)
+      return(tb_out)
+    }
+  ) %>% 
+  purrr::reduce(
+    .f = function(tb_big, tb_small) {
+      tb_tmp <- 
+        tb_small %>% 
+        mutate(new_ones = !id %in% tb_big$id)
+      parent_to_insert <- 
+        tb_tmp %>% 
+        filter(!new_ones) %>% 
+        pull(id) %>% 
+        tail(1)
+      indent_to_insert <- 
+        tb_tmp %>% 
+        filter(new_ones) %>% 
+        pull(indent) %>% 
+        head(1)
+      break_point_id <- 
+        tb_big %>% 
+        slice((which(tb_big$id == parent_to_insert) + 1):nrow(tb_big)) %>% 
+        filter(indent < indent_to_insert) %>% 
+        pull(id) %>% 
+        head(1)
+      if (length(break_point_id) == 0L) {
+        tb_big_new <- bind_rows(
+          tb_big,
+          tb_small %>% filter(!id %in% tb_big$id)
+        )
+      } else {
+        break_point <- which(tb_big$id == break_point_id) - 1
+        tb_big_new <- bind_rows(
+          tb_big %>% slice(1:break_point),
+          tb_small %>% filter(!id %in% tb_big$id),
+          tb_big %>% slice((break_point + 1):nrow(tb_big))
+        )
+      }
+      return(tb_big_new)
+    }
   )
+x <- 
+  bind_rows(
+    tb_test %>% slice(1),
+    left_join(
+      tb_reorder %>% select(id),
+      tb_test,
+      by = "id"
+    )
+  )
+
+
+
 vroom::vroom_write(
   tb_final, 
   file = "/data1/suna/work/mag_bvdv_allstar/outdir_test02/TaxProfile/kraken2/xit.csv",
