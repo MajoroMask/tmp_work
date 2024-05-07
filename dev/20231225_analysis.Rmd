@@ -1,0 +1,1202 @@
+---
+title: "Yet Another Analysis"
+date: "`r Sys.Date()`"
+author: "You-know-who"
+output:
+  rmdformats::robobook:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r magic}
+a <- new.env(parent = emptyenv())
+a$path_project <- "~/proj/tmp_work/"
+a$pwd <- "/data1/suna/work/tmp_work/20231225_analysis"
+suppressWarnings(dir.create(a$pwd))
+setwd(a$pwd)
+
+# suppressPackageStartupMessages(library(msa))
+suppressPackageStartupMessages(library(seqinr))
+
+suppressPackageStartupMessages(library(glue))
+suppressPackageStartupMessages(library(ggstatsplot))
+suppressPackageStartupMessages(library(taxizedb))
+
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vroom))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(fs))
+
+a$pdi <- path(a$pwd, "_i/")
+a$pdo <- path(a$pwd, "_o/")
+dir_create(a$pdi)
+dir_create(a$pdo)
+```
+
+```{r renderHTML, include=FALSE, eval=FALSE}
+rmarkdown::render(
+  "~/proj/tmp_work/bin/20231225_analysis.Rmd",
+  output_file = "report.html",
+  output_dir = a$pdo,
+  knit_root_dir = a$pwd
+)
+```
+
+```{r init, include=FALSE}
+## Global options
+
+a$font_family <- "sarasa-term-sc-nerd-regular"
+a$font_regular <-
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>%
+  path_real()
+sysfonts::font_add(
+  family = a$font_family,
+  regular = a$font_regular
+)
+showtext::showtext_auto()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  cache = FALSE,
+  prompt = FALSE,
+  tidy = FALSE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5,
+  fig.retina = 2
+)
+knitr::opts_knit$set(width = 160)
+```
+
+```{r ggplot_theme, include=FALSE, eval=FALSE}
+my_theme <-
+  ggthemes::theme_calc() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(family = a$font_family),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+old_theme <- theme_set(my_theme)
+```
+
+```{r utils}
+#' gsa
+#'
+#' group_by() %>% summarise() %>% arrange()
+#'
+#' @inheritParams dplyr::group_by
+#' @return A tibble.
+#'
+#' @export
+#'
+gsa <- function(.data, ..., .sort = TRUE) {
+  requireNamespace("dplyr", quietly = TRUE)
+  .data %>%
+    group_by(...) %>%
+    tally(sort = .sort) %>%
+    ungroup() %>%
+    # mutate(pct = round(n / sum(n), digits = 3))
+    mutate(pct = scales::percent(round(n / sum(n), digits = 3)))
+}
+
+pipe_end <- function(x) x
+
+read_xlsx <- function(...) {
+  tb_out <-
+    openxlsx::read.xlsx(...) %>%
+    tibble::as_tibble()
+  return(tb_out)
+}
+```
+
+```{r functions}
+read_krakentools_combined_report <- function(input) {
+  n_samples <- 
+    str_replace(
+      readLines(input, n = 1),
+      "#Number of Samples: ", 
+      ""
+    ) %>% 
+    as.integer()
+  tb_filename <- 
+    vroom::vroom(
+      input, 
+      delim = "\t",
+      col_names = c("index", "path_input"),
+      col_types = "cc",
+      skip = 2L,
+      n_max = n_samples
+    ) %>% 
+    mutate(
+      index = str_replace(index, "^#S", ""),
+      sample = 
+        fs::path_file(path_input) %>% 
+        as.character() %>% 
+        # str_replace("_kraken2_report.txt$", "")
+        str_replace("_pe_.*$", "")
+    )
+  tb_data <- 
+    vroom::vroom(
+      input, 
+      delim = "\t",
+      col_names = c(
+        "perc", "tot_all", "tot_lvl", 
+        paste(rep(tb_filename$sample, each = 2), c("_all", "_lvl"), sep = ""),
+        "lvl_type", "taxid", "name"
+      ),
+      show_col_types = FALSE,
+      skip = n_samples + 3L
+    ) %>% 
+    relocate(taxid, name, .before = 1)
+  return(tb_data)
+}
+
+get_taxinfo_table <- function(tax_id, 
+                              path_sql_ncbi,
+                              path_merged_dmp,
+                              reorder = FALSE) {
+  requireNamespace("taxizedb", quietly = TRUE)
+  
+  # taxizedb cache setup
+  assertthat::assert_that(
+    fs::path_file(path_sql_ncbi) == "NCBI.sql",
+    msg = "Filename of `path_sql_ncbi` must be 'NCBI.sql'!"
+  )
+  pd_sql_ncbi <- fs::path_dir(path_sql_ncbi)
+  old_tdb_cache <- taxizedb::tdb_cache$cache_path_get()
+  on.exit(taxizedb::tdb_cache$cache_path_set(full_path = old_tdb_cache))
+  taxizedb::tdb_cache$cache_path_set(full_path = pd_sql_ncbi)
+  
+  # update tax_id by merged.dmp
+  tb_merged_dmp <- 
+    path_merged_dmp %>% 
+    vroom::vroom(
+      delim = "|", 
+      col_names = c("tax_id", "new", "empty"), 
+      col_types = "ddl",
+      trim_ws = TRUE
+    ) %>% 
+    select(-empty)
+  tb_tax_id <- 
+    tibble(tax_id = tax_id) %>% 
+    left_join(tb_merged_dmp, by = "tax_id") %>% 
+    mutate(tax_id_updated = if_else(is.na(new), tax_id, new)) %>% 
+    select(tax_id, tax_id_updated)
+  
+  # get taxonomy information
+  l_tax_info <- 
+    tb_tax_id$tax_id_updated %>% 
+    unique() %>% 
+    taxizedb::classification(db = "ncbi")
+  tb_tax_info <- 
+    purrr::map2_dfr(
+      .x = l_tax_info,
+      .y = l_tax_info %>% names(),
+      .f = function(tb, tax_id) {
+        if (tax_id == 0) {
+          tb_out <- tibble(
+            tax_id = as.double(tax_id),
+            name = "unclassified"
+          )
+        } else if (tax_id == 1) {
+          tb_out <- tibble(
+            tax_id = as.double(tax_id),
+            name = "root"
+          )
+        } else if (is.null(dim(tb))) {
+          tb_out <- tibble(tax_id = as.double(tax_id))
+        } else {
+          tb_out <- tibble(
+            tax_id = tail(tb$id, 1) %>% as.double(),
+            name = tail(tb$name, 1),
+            rank = tail(tb$rank, 1),
+            lineage_tax_id = paste(tb$id, collapse = ";"),
+            lineage_name = paste(tb$name, collapse = ";"),
+            lineage_rank = paste(tb$rank, collapse = ";")
+          )
+        }
+        return(tb_out)
+      }
+    )
+  tb_output <- 
+    tb_tax_id %>% 
+    left_join(tb_tax_info, by = c("tax_id_updated" = "tax_id"))
+  return(tb_output)
+}
+
+get_dna_similarity <- function(l_input,
+                               cores = 2,
+                               batches = 1,
+                               verbose = FALSE,
+                               type = "local", 
+                               submat = "BLOSUM62", 
+                               gap.opening = 10, 
+                               gap.extension = 4) {
+  doParallel::registerDoParallel(cores)
+  
+  # generate lower matrix index
+  idx <- combn(1:length(l_input), 2)
+  
+  # split index into k batches
+  split2 <- function(x, k) split(x, sort(rank(x) %% k))
+  idxbatch <- split2(1:ncol(idx), batches)
+  
+  # then use foreach parallelization
+  # input is all pair combinations (in each batch)
+  `%mydopar%` <- foreach::`%dopar%`
+  seqsimlist_batch <- vector("list", batches)
+  for (k in 1:batches) {
+    if (verbose) cat("Starting batch", k, "of", batches, "\n")
+    seqsimlist_batch[[k]] <- foreach::foreach(
+      i = idxbatch[[k]], .errorhandling = "pass"
+    ) %mydopar% {
+      tmp <- calculate_pair_seq_sim(
+        rev(idx[, i]), l_input, type, submat, gap.opening, gap.extension
+      )
+    }
+  }
+  
+  # merge all batches
+  seqsimlist <- as.list(unlist(seqsimlist_batch))
+  
+  # convert list to matrix
+  seqsimmat <- matrix(0, length(l_input), length(l_input))
+  for (i in 1:length(seqsimlist)) {
+    seqsimmat[idx[2, i], idx[1, i]] <- seqsimlist[[i]]
+  }
+  seqsimmat[upper.tri(seqsimmat)] <- t(seqsimmat)[upper.tri(t(seqsimmat))]
+  diag(seqsimmat) <- 1
+  
+  return(seqsimmat)
+}
+
+calculate_pair_seq_sim <- function(twoid, 
+                                   l_input, 
+                                   type, 
+                                   submat, 
+                                   gap.opening, 
+                                   gap.extension) {
+  id1 <- twoid[1]
+  id2 <- twoid[2]
+  
+  if (l_input[[id1]] == "" | l_input[[id2]] == "") {
+    sim <- 0L
+  } else {
+    s1 <- try(Biostrings::DNAString(l_input[[id1]]), silent = TRUE)
+    s2 <- try(Biostrings::DNAString(l_input[[id2]]), silent = TRUE)
+    s12 <- try(
+      Biostrings::pairwiseAlignment(
+        s1, s2,
+        type = type, substitutionMatrix = submat, scoreOnly = TRUE,
+        gapOpening = gap.opening, gapExtension = gap.extension
+      ),
+      silent = TRUE
+    )
+    s11 <- try(
+      Biostrings::pairwiseAlignment(
+        s1, s1,
+        type = type, substitutionMatrix = submat, scoreOnly = TRUE,
+        gapOpening = gap.opening, gapExtension = gap.extension
+      ),
+      silent = TRUE
+    )
+    s22 <- try(
+      Biostrings::pairwiseAlignment(
+        s2, s2,
+        type = type, substitutionMatrix = submat, scoreOnly = TRUE,
+        gapOpening = gap.opening, gapExtension = gap.extension
+      ),
+      silent = TRUE
+    )
+    
+    if (is.numeric(s12) == FALSE | 
+        is.numeric(s11) == FALSE | 
+        is.numeric(s22) == FALSE) {
+      sim <- 0L
+    } else if (abs(s11) < .Machine$double.eps | 
+               abs(s22) < .Machine$double.eps) {
+      sim <- 0L
+    } else {
+      sim <- s12 / sqrt(s11 * s22)
+    }
+  }
+  sim
+}
+```
+
+# 0 数据
+
+前情提要：
+
+- 根据之前对批次`1127`的分析，我们发现：
+  - 提升测序数据量对病毒检测线的提升是线性的，符合预期
+  - 同一组数据对不同`BVDV`亚型/株系的基因组比对，其覆盖度/测序深度/比对质量有较大差异，且对`BVDV1`，`BVDV2`和`BVDV3`的三个亚型的基因组比对质量都很差。
+  - `BVDV`不同亚型的基因组之间，序列相似度并没有很高。
+- 这提示我们，我们使用的`BVDV`菌株的基因组序列，和我们用于构建各种工具的reference的基因组序列，可能存在比较大的差异。
+- `kraken2`作为基于基因组序列比对的taxonomy profiler，构建reference的方式会影响结果。
+  - 通常我们使用的库来自`RefSeq viral`，即`RefSeq`整理的全病毒基因组序列库。
+- 读长较短的reads（15~80），在序列比对时更容易获得质量较低的比对结果。
+
+本次纳入分析的数据：
+
+- 自`0825`以来的若干次实验，使用`BVDV`测试病毒梯度：
+  - `0825`：梯度浓度（e2~e5）的`BVDV`样品进行RNA建库，去除gDNA，去除rRNA，共10个样品（4梯度 × 2重复 + 2 NTC）。
+  - `1202`：`0825`的重复，样品组成相同。
+  - `0915`：应该是“RNA建库 + `BVDV`梯度量（e2~e5）+ `293T`模拟宿主”的组合，共16个样品（4梯度 × 2重复 × 有/无293T宿主 + 2 NTC）。
+  - `1007`：`293T`模拟宿主，`BVDV`梯度量（5e1~5e6），共18个样品（6梯度 × 2重复 + 2 `293T`对照 + 4 NTC）。
+  - `1110`：`H7N9`固定量 + `BVDV`梯度量（7e1~7e6），共19个样品（6梯度 × 2重复 + 3 `H7N9`对照 + 4 NTC）。
+  - `1127`：`1110`的`BVDV`样品增加数据量重新测序，共6个样品（6梯度）。
+
+- 分析使用了
+
+```{r magic01, echo=FALSE}
+a$ppl_pwd <- path("/data1/suna/work/mag_bvdv_allstar/")
+a$ppl_outdir <- path(a$ppl_pwd, "outdir_test02")
+a$pd_bvdv <- path(a$ppl_outdir, "Mapping/candidate_genome")
+
+a$path_sql_ncbi <- 
+  path("/data1/database/taxprofiler_databases/taxdump/NCBI.sql")
+taxizedb::tdb_cache$cache_path_set(full_path = fs::path_dir(a$path_sql_ncbi))
+
+a$pd_taxdump <- path("/data1/database/taxprofiler_databases/taxdump/")
+```
+
+```{r readDataSamplesheet}
+# samplesheet
+tb_samplesheet <- 
+  vroom(
+    path(a$ppl_pwd, "samplesheet_add_batch.csv"),
+    # path(a$ppl_pwd, "samplesheet_all_20240102_add_batch.csv"),
+    show_col_types = FALSE
+  ) %>% 
+  mutate(
+    sample_path = sample,
+    is_ntc = str_detect(sample, "NTC"),
+    level = 
+      case_when(
+        str_detect(sample, "BVDV_\\d?E\\d_") ~ 
+          str_replace(sample, ".*BVDV_\\d?(E\\d)_.*", "\\1"),
+        str_detect(sample, "NTC") ~ "NTC",
+        .default = "Non-BVDV samples"
+      ) %>% 
+      as.factor()
+  ) %>% 
+  arrange(batch, is_ntc, sample) %>% 
+  mutate(sample = fct_inorder(sample))
+```
+
+```{r readDataFastp}
+tb_fastp <- 
+  path(a$ppl_outdir, "QC_shortreads", "fastp_results.csv") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  select(
+    sample = sample_id, 
+    n_raw_reads = `summary--before_filtering.total_reads`,
+    n_raw_base = `summary--before_filtering.total_bases`,
+    n_clean_reads = `summary--after_filtering.total_reads`,
+    n_clean_bases = `summary--after_filtering.total_bases`
+  ) %>% 
+  mutate(
+    across(
+      .cols = starts_with("n_"),
+      .fns = log10,
+      .names = "log10_{.col}"
+    )
+  )
+```
+
+```{r readDataKraken2}
+# kraken2 results
+tb_krakentools_combined <- 
+  path(a$ppl_outdir, "TaxProfile/kraken2", 
+       "kraken2_20231215_virus_bvdv_combined_reports.txt") %>% 
+  read_krakentools_combined_report() %>% 
+  select(
+    id = taxid, name, rank = lvl_type, 
+    total_all = tot_all, 
+    total_lvl = tot_lvl
+  )
+
+l_inputs <- 
+  path(a$ppl_outdir, "TaxProfile/kraken2/20231215_virus_bvdv") %>% 
+  dir_ls()
+l_ids <- 
+  l_inputs %>% 
+  fs::path_file() %>% 
+  str_replace("_pe_.*", "")
+tb_kraken2_reports <- 
+  map2_dfr(
+    .x = l_inputs,
+    .y = l_ids,
+    .f = function(input_path, input_id) {
+      tb_output <- 
+        input_path %>% 
+        vroom::vroom(
+          delim = "\t", 
+          col_names = c(
+            "pct", "reads_all", "reads_lvl", 
+            "n_mini", "n_mini_uniq", "rank", "id", "name"
+          ),
+          col_types = "ciiiicic",
+          trim_ws = FALSE
+        ) %>% 
+        transmute(
+          id,
+          name,
+          rank,
+          all = reads_all,
+          lvl = reads_lvl,
+          nmini = n_mini,
+          umini = n_mini_uniq,
+          sample = input_id
+        )
+      return(tb_output)
+    }
+  )
+tb_kraken2_combined <- 
+  tb_krakentools_combined %>% 
+  left_join(
+    tb_kraken2_reports %>% 
+      pivot_wider(
+        id_cols = id,
+        names_from = sample,
+        values_from = c(all, lvl, nmini, umini),
+        names_glue = "{sample}_{.value}",
+        names_vary = "slowest",
+        values_fill = 0L
+      ),
+    by = "id"
+  )
+rm(l_inputs, l_ids, tb_krakentools_combined, tb_kraken2_reports)
+```
+
+```{r data4Plot01}
+tb_tmp <- 
+  tb_kraken2_combined %>% 
+  slice(1, 2) %>% 
+  select(name, ends_with("_all")) %>% 
+  select(-total_all) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "reads"
+  ) %>% 
+  pivot_wider(
+    id_cols = sample, 
+    names_from = "name",
+    values_from = "reads"
+  ) %>% 
+  mutate(sample = str_replace(sample, "_all", "")) %>% 
+  rename(classified = root) %>% 
+  mutate(
+    log10_classified = log10(classified),
+    log10_unclassified = log10(unclassified)
+  ) %>% 
+  mutate(
+    pct_classified = classified / (classified + unclassified),
+    pct_unclassified = unclassified / (classified + unclassified)
+  )
+tb_kraken2_pct <- 
+  tb_samplesheet %>% 
+  select(sample, batch, level) %>% 
+  left_join(tb_tmp, by = "sample") %>% 
+  left_join(tb_fastp, by = "sample")
+rm(tb_tmp)
+
+enlist_taxids <- c(11095, 11099, 221918, 67082, 28285, 129951, 0)
+tb_tmp <- 
+  tb_kraken2_combined %>% 
+  filter(id %in% enlist_taxids) %>% 
+  mutate(.index = factor(id, levels = enlist_taxids)) %>% 
+  arrange(.index) %>% 
+  select(-.index) %>% 
+  select(name, matches("(_lvl$)|(_all$)|(_umini$)|(_nmini$)")) %>% 
+  select(-total_all, -total_lvl) %>% 
+  pivot_longer(
+    cols = -name,
+    names_to = "sample",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    type = str_replace(sample, ".*_(lvl$|all$|umini$|nmini$)", "\\1"),
+    sample = str_replace(sample, "(_lvl$)|(_all$)|(_umini$)|(_nmini$)", "")
+  ) %>% 
+  pivot_wider(
+    id_cols = c(name, sample),
+    names_from = "type",
+    values_from = "value"
+  ) %>% 
+  mutate(
+    name = 
+      case_match(
+        name,
+        "Pestivirus" ~ "Pestivirus",
+        "Bovine viral diarrhea virus 1" ~ "BVDV1",
+        "Bovine viral diarrhea virus VEDEVAC" ~ "BVDV VEDEVAC",
+        "BeAn 58058 virus" ~ "BAV",
+        "Human adenovirus 5" ~ "HAV5",
+        "Human mastadenovirus C" ~ "HMVC",
+        .default = name
+      ) %>% 
+      fct_inorder()
+  )
+tb_plot_kraken2 <- 
+  tb_tmp %>% 
+  left_join(tb_kraken2_pct, by = "sample") %>% 
+  mutate(
+    classified_pct = all / classified,
+    clean_pct = all / (classified + unclassified)
+  )
+rm(tb_tmp)
+```
+
+# 1 kraken2结果
+
+```{r funcBarplot}
+# x         log10(all + 1)
+# y         sample
+# fill      level
+# label     all
+# facet row batch
+# facet col name
+plot_reads_count <- function(tb) {
+  p <- 
+    ggplot(tb) +
+    geom_bar(
+      aes(y = sample, x = log10(all + 1), fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(y = sample, x = 0, label = all),
+      hjust = 0, vjust = 0.5
+    ) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(name),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "# reads (log10)", y = NULL)
+  return(p)
+}
+
+# x         log10(all + 1)
+# y         classified_pct
+# fill      level
+# label     classified_pct
+# facet row batch
+# facet col name
+plot_classified_pct <- function(tb, accu = 0.01) {
+  p <- 
+    ggplot(tb) +
+    geom_bar(
+      aes(y = sample, x = classified_pct, fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(
+        y = sample, x = 0, 
+        label = scales::percent(classified_pct, accuracy = accu)
+      ),
+      hjust = 0, vjust = 0.5
+    ) +
+    scale_x_continuous(labels = scales::percent) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(name),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "% to classified reads", y = NULL)
+  return(p)
+}
+
+# x         log10(all + 1)
+# y         log10(clean_pct)
+# fill      level
+# label     scientific(clean_pct)
+# facet row batch
+# facet col name
+plot_total_pct <- function(tb) {
+  p <- 
+    ggplot(tb) +
+    geom_bar(
+      aes(y = sample, x = log10(clean_pct), fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(
+        y = sample, x = 0.05, 
+        label = scales::scientific(clean_pct)
+      ),
+      hjust = 0, vjust = 0.5
+    ) +
+    scale_x_continuous(expand = expansion(add = c(0.5, 2.5))) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(name),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "% to clean reads (log10)", y = NULL)
+  return(p)
+}
+
+# x         log10(all + 1)
+# y         log10(clean_pct)
+# fill      level
+# label     scientific(clean_pct)
+# facet row batch
+# facet col name
+plot_umini_count <- function(tb) {
+  p <- 
+    ggplot(tb) +
+    geom_bar(
+      aes(y = sample, x = log10(umini + 1), fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(y = sample, x = 0, label = umini),
+      hjust = 0, vjust = 0.5
+    ) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(name),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "# unique minimizer (log10)", y = NULL)
+  return(p)
+}
+
+# x         log10(all + 1)
+# y         log10(clean_pct)
+# fill      level
+# label     scientific(clean_pct)
+# facet row batch
+# facet col name
+plot_nmini_count <- function(tb) {
+  p <- 
+    ggplot(tb) +
+    geom_bar(
+      aes(y = sample, x = log10(nmini + 1), fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(y = sample, x = 0, label = nmini),
+      hjust = 0, vjust = 0.5
+    ) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(name),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "# minimizer (log10)", y = NULL)
+  return(p)
+}
+```
+
+## 1.1 修改kraken2 reference，效果明显
+
+引入`BVDV VEDEVAC`基因组序列进入kraken2 reference后，`0825`和`1202`对疫病毒属，`BVDV VEDEVAC`，`BVDV 1`的reads数如下图所示：
+
+```{r}
+tb_plot_kraken2 %>%
+  filter(
+    batch %in% c("0825", "1202"),
+    name %in% c("Pestivirus", "BVDV1", "BVDV VEDEVAC", "HAV5")
+  ) %>%
+  plot_reads_count()
+```
+
+## 1.2 reads count和minimizer
+
+下面引入新的统计量：kraken2 minimizer。
+
+- Minimizer是kraken2缩小k-mer建库的内存占用的方式，可理解为间接表示unique k-mer。
+- 对某个特定的reference而言，在一个库中其可用的minimizer有上限。该上限和库复杂度、病毒基因组大小，同源序列数量有关。（注：minimizer长度为31bp）
+  - `BVDV VEDEVAC`：3926
+  - `BVDV1`：3781
+  - `BAV`：39202
+  - `HAV5`：4110
+
+下图是total minimizer count（不对minimizer去重）。
+
+```{r}
+tb_plot_kraken2 %>% 
+  filter(
+    batch %in% c("0825", "1202"),
+    name %in% c("Pestivirus", "BVDV1", "BVDV VEDEVAC", "HAV5")
+  ) %>% 
+  plot_nmini_count()
+```
+
+下图是unique minimizer count（对minimizer去重）。
+
+```{r}
+tb_plot_kraken2 %>% 
+  filter(
+    batch %in% c("0825", "1202"),
+    name %in% c("Pestivirus", "BVDV1", "BVDV VEDEVAC", "HAV5")
+  ) %>% 
+  plot_umini_count()
+```
+
+可以发现：
+
+- Total minimizer和reads count相似，可以反应定量信息。
+- 相应的，unique minimizer主要反应定性信息。当一个病毒的unique minimizer接近上限，我们有理由认为
+- 我们可以通过这两个指标及其衍生统计量，来对kraken2结果进行更多过滤。
+  - `检测umini / 理论umini上限`：类似序列比对覆盖度的指标。
+  - `nmini / umini`：类似测序深度/建库复杂度的指标。
+  - 如果一个病毒`reads count`和`nmini`都很高，但`umini`或者`umini / 理论umini上限`很低，就可以考虑其为**来源于宿主样品的病毒**，甚至是**宿主内源性病毒**的可能性。
+- 目前想到使用minimizer的优点：
+  - 注意到`BAV`在批次间，样品间（包括NTC）的稳定性，unique minimizer可以更好地反应污染的状态。
+  - 基于minimizer的定义，可知无论去重，minimizer都具有比reads count更细的颗粒度。
+
+对应的reads在各自样品种的classified reads/total reads占比如下图所示：
+
+```{r}
+tb_plot_kraken2 %>% 
+  filter(
+    batch %in% c("0825", "1202"),
+    name %in% c("Pestivirus", "BVDV1", "BVDV VEDEVAC", "HAV5")
+  ) %>% 
+  plot_classified_pct()
+tb_plot_kraken2 %>% 
+  filter(
+    batch %in% c("0825", "1202"),
+    name %in% c("Pestivirus", "BVDV1", "BVDV VEDEVAC", "HAV5")
+  ) %>% 
+  plot_total_pct()
+```
+
+- `BVDV`浓度梯度可以较好的复现。
+- 观察classified reads占比分布可知，`E2`样品受污染影响严重，但`E5`样品中目标病毒几乎接近饱和。
+
+## 1.3 minimizer呈现更好的线性
+
+```{r funcBarplot02}
+plot_rnu <- function(tb) {
+  tb_p <- 
+    tb %>% 
+    select(name, sample, batch, level, all, nmini, umini) %>% 
+    pivot_longer(
+      cols = c(all, nmini, umini),
+      names_to = "facet_col",
+      values_to = "value"
+    ) %>% 
+    mutate(
+      facet_col = case_match(
+        facet_col,
+        "all" ~ "# reads",
+        "nmini" ~ "# total mini",
+        "umini" ~ "# unique mini"
+      )
+    )
+  p <- 
+    ggplot(tb_p) +
+    geom_bar(
+      aes(y = sample, x = log10(value + 1), fill = level), 
+      stat = "identity"
+    ) +
+    geom_label(
+      aes(y = sample, x = 0, label = value),
+      hjust = 0, vjust = 0.5
+    ) +
+    ggthemes::scale_fill_gdocs(guide = "none") +
+    facet_grid(
+      rows = vars(batch),
+      cols = vars(facet_col),
+      scales = "free",
+      space = "free_y"
+    ) +
+    theme_bw() +
+    labs(x = "#", y = NULL)
+  return(p)
+}
+```
+
+下图是`1110`和`1127`两批数据，对`BVDV VEDEVAC`的reads count，total minimizer和unique minimizer计数统计：
+
+```{r}
+tb_plot_kraken2 %>% 
+  filter(
+    batch %in% c("1110", "1127"),
+    name %in% c("BVDV VEDEVAC")
+  ) %>% 
+  plot_rnu()
+```
+
+这批数据的分析调整了若干参数，使分析效果变好：
+
+- 影响最大的应该是将`BVDV VEDEVAC`加入kraken2 reference。
+- `reads length`大于80，去除大量读长较短的低质量reads。
+- `kraken2 confidence`大于0.1，去除一部分kraken2假阳。
+
+<!-- # 1.4 汇总上述数据的图展示效果不好，单独保存在pdf中。 -->
+
+```{r barplot4Total}
+p_kraken_count_total <- 
+  tb_plot_kraken2 %>% 
+  filter(!is.na(batch)) %>% 
+  plot_reads_count()
+p_classified_pct_total <- 
+  tb_plot_kraken2 %>% 
+  filter(!is.na(batch)) %>% 
+  mutate(
+    classified_pct = if_else(name == "unclassified", 0, classified_pct)
+  ) %>% 
+  plot_classified_pct()
+p_clean_pct_total <- 
+  tb_plot_kraken2 %>% 
+  filter(!is.na(batch)) %>% 
+  plot_total_pct()
+p_nmini_total <- 
+  tb_plot_kraken2 %>% 
+  filter(!is.na(batch)) %>% 
+  plot_nmini_count()
+p_umini_total <- 
+  tb_plot_kraken2 %>% 
+  filter(!is.na(batch)) %>% 
+  plot_umini_count()
+```
+
+```{r}
+ggsave(
+  p_kraken_count_total, filename = path(a$pdo, "p_kraken_count_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_classified_pct_total, filename = path(a$pdo, "p_classified_pct_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_clean_pct_total, filename = path(a$pdo, "p_clean_pct_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_nmini_total, filename = path(a$pdo, "p_nmini_total_0.1.pdf"),
+  height = 25, width = 25
+)
+ggsave(
+  p_umini_total, filename = path(a$pdo, "p_umini_total_0.1.pdf"),
+  height = 25, width = 25
+)
+```
+
+# 2 对不同`BVDV`亚型/菌株的基因组比对
+
+在之前我们发现湿实验使用的`BVDV`可能不是`BVDV1`这个亚型后，我们在NCBI上查找了所有瘟病毒属（`Pesitivirus`，taxonomy ID 11095）的种、亚型和菌株，其中taxon不重复且有基因组可供使用的亚型/菌株（n = 30）如下表所示。
+
+```{r readDataGenomeInfo}
+tb_tmp <- 
+  fs::path("/data1/suna/work/tmp_work/20231225_get_all_BVDVs/_o", 
+           "refsheet_BVDV_allstar.csv") %>% 
+  vroom::vroom(show_col_types = FALSE)
+tb_bvdv_list <- 
+  fs::path("/data1/suna/work/tmp_work/20231225_get_all_BVDVs/_o", 
+           "refsheet_BVDV_allstar_extendend.csv") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  transmute(
+    tax_id,
+    name = 
+      str_replace(organism, " \\(viruses\\)", "") %>% 
+      str_replace("Bovine viral diarrhea virus", "BVDV")
+  ) %>% 
+  left_join(tb_tmp, by = "tax_id") %>% 
+  arrange(name) %>%
+  mutate(
+    across(
+      .cols = c(name),
+      .fns = fct_inorder
+    )
+  ) %>%
+  pipe_end()
+rm(tb_tmp)
+
+knitr::kable(tb_bvdv_list %>% select(-reference))
+```
+
+## 2.1 `Pesitivirus`、`BVDV`不同参考基因组的序列差异
+
+这里我们通过计算任意两个两个参考基因组，其双序列比对打分的几何平均值来表征两个参考基因组间的序列相似性，从而获得所有参考基因组的相似性矩阵。
+
+- 分布在`[0.33, 0.96]`之间，均值`0.57`，中位数`0.61`
+- 总体分布和分类学分组相符，即同一个种的不同亚型/菌株相似度较高，种间相似度较低。
+
+```{r calculateDnaSimilarity}
+path_simi_matrix_cache <- path(a$pdo, "m_sim.rds")
+
+if (fs::file_exists(path_simi_matrix_cache)) {
+  m_sim <- readRDS(path_simi_matrix_cache)
+} else {
+  l_bvdv_genome <- 
+    purrr::map2(
+      .x = tb_bvdv_list$reference,
+      .y = tb_bvdv_list$name,
+      .f = ~ 
+        seqinr::read.fasta(file = .x, as.string = TRUE) %>% 
+        `[[`(1) %>% 
+        as.character() %>% 
+        `names<-`(.y)
+    )
+  m_sim <- get_dna_similarity(l_bvdv_genome, cores = 5)
+  colnames(m_sim) <- tb_bvdv_list$name
+  rownames(m_sim) <- tb_bvdv_list$name
+  saveRDS(m_sim, file = path_simi_matrix_cache)
+}
+```
+
+```{r genomeSimiHeatmap, fig.dim=c(7, 7)}
+p_heatmap <- ComplexHeatmap::pheatmap(
+  m_sim, 
+  color = viridis::inferno(100),
+  breaks = seq(0, 1, 0.01)
+)
+ComplexHeatmap::draw(p_heatmap)
+```
+
+在此基础上，只观察`BVDV`的亚种/菌株（n = 14），可见：
+
+- 相似度分布在`[0.60, 0.96]`之间，均值`0.71`，中位数`0.65`，分布集中在0.6~0.8的区间内。
+- `BVDV1`/`2`/`3`之间差异明显，`BVDV1`的几个亚型之间也有一定差异。
+
+```{r genomeSimiHeatmapOnlyBVDV, fig.dim=c(6, 6)}
+m_sim_bvdv <- 
+  m_sim[
+    str_detect(rownames(m_sim), "BVDV"), 
+    str_detect(colnames(m_sim), "BVDV")
+  ]
+p_heatmap_bvdv <- ComplexHeatmap::pheatmap(
+  m_sim_bvdv, 
+  color = viridis::inferno(100),
+  breaks = seq(0.5, 1, 0.005)
+)
+ComplexHeatmap::draw(p_heatmap_bvdv)
+```
+
+# 3 基因组比对
+
+```{r magic02}
+a$ppl_outdir03 <- path(a$ppl_pwd, "outdir_test03")
+```
+
+```{r readDataMapping}
+# samplesheet
+sample_subset <- 
+  vroom(path(a$ppl_pwd, "samplesheet_sub.csv"), show_col_types = FALSE) %>% 
+  pull(sample)
+tb_samplesheet_sub <- 
+  tb_samplesheet %>% 
+  filter(sample %in% sample_subset)
+rm(sample_subset)
+
+# coverage
+tb_tmp <- 
+  path(a$ppl_outdir03, "Mapping", "bbmap_covstats_genome.csv") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  rename(sample = id) %>% 
+  # rename(tax_id_ori = tax_id) %>% 
+  left_join(
+    tb_bvdv_list %>% select(tax_id, name), 
+    by = "tax_id"
+  ) %>% 
+  relocate(name, .before = tax_id) %>% 
+  mutate(
+    n_reads = plus_reads + minus_reads,
+    .after = minus_reads
+  )
+tb_cov <- 
+  tb_samplesheet_sub %>% 
+  select(sample, batch, level) %>% 
+  left_join(tb_tmp, by = "sample")
+rm(tb_tmp)
+
+# mapping quality
+tb_mq <- 
+  purrr::pmap_dfr(
+    .l = expand_grid(
+      tb_samplesheet_sub %>% select(sample),
+      tb_bvdv_list %>% select(tax_id, tax_name = name),
+      tibble(dedup = c("raw", "dedup"))
+    ),
+    .f = function(sample, tax_name, tax_id, dedup) {
+      tb_bed <- 
+        fs::path(
+          a$ppl_outdir03, "Mapping", sample, tax_id,
+          glue("{sample}_{tax_id}_{dedup}_merged.bed")
+        ) %>% 
+        vroom::vroom(
+          col_names = c("seq", "start", "stop", "n_reads", "mean_mq", 
+                        "smp", "tax_id", "tax_name"),
+          show_col_types = FALSE
+        )
+      tb_out <- 
+        tibble(
+          sample = sample,
+          tax_id = tax_id,
+          dedup_type = dedup
+        ) %>% 
+        mutate(
+          mean_mq = ifelse(
+            nrow(tb_bed) == 0,
+            0,
+            sum(tb_bed$mean_mq * tb_bed$n_reads) / sum(tb_bed$n_reads)
+          )
+        )
+      return(tb_out)
+    }
+  )
+tb_mapping <- 
+  tb_cov %>% 
+  left_join(tb_mq, by = c("sample", "tax_id", "dedup_type")) %>% 
+  mutate(
+    log10_n_reads = log10(n_reads + 1),
+    .after = n_reads
+  )
+rm(tb_cov, tb_mq)
+```
+
+条件所限，我们使用`1202`和`1110`两批数据（n = 22），对上述瘟病毒属基因组进行序列比对。
+
+## 3.1 `# mapped reads` vs `genomes`
+
+`1202`批次如下，只考察`E5`，比对结果去重：
+
+```{r}
+ggbetweenstats(
+  tb_mapping %>% 
+    filter(
+      batch == "1202",
+      level %in% c("E5"),
+      dedup_type == "dedup",
+      n_reads != 0
+    ), 
+  x = name, 
+  y = n_reads, 
+  bf.message = FALSE, 
+  pairwise.comparisons = FALSE,
+  # package = "ggthemes",
+  # palette = "Tableau_20",
+  xlab = "serotype/stain",
+  ylab = "# mapped reads"
+) + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+`1110`批次如下，同样只考察`E5`，比对结果去重：
+
+```{r}
+ggbetweenstats(
+  tb_mapping %>% 
+    filter(
+      batch == "1110",
+      level %in% c("E5"),
+      dedup_type == "dedup",
+      n_reads != 0
+    ), 
+  x = name, 
+  y = n_reads, 
+  bf.message = FALSE, 
+  pairwise.comparisons = FALSE,
+  # package = "ggthemes",
+  # palette = "Tableau_20",
+  xlab = "serotype/stain",
+  ylab = "# mapped reads"
+) + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## 3.2 `mapping quality`
+
+首先是`genomes` vs `mapping quality`，可见结论不变。
+
+```{r}
+ggbetweenstats(
+  tb_mapping %>% 
+    filter(
+      # name == "BVDV VEDEVAC",
+      # batch == "1202",
+      dedup_type == "dedup",
+      n_reads != 0
+    ), 
+  x = name,
+  y = mean_mq, 
+  bf.message = FALSE, 
+  pairwise.comparisons = FALSE,
+  # package = "ggthemes",
+  # palette = "Tableau_20",
+  xlab = "serotype/stain",
+  ylab = "mean mapping quality"
+) + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+不同`BVDV`量级，对`BVDV VEDEVAC`的比对维持了较高的平均比对质量：
+
+```{r}
+ggbetweenstats(
+  tb_mapping %>% 
+    filter(
+      name == "BVDV VEDEVAC",
+      # batch == "1202",
+      dedup_type == "dedup",
+      n_reads != 0
+    ), 
+  x = level,
+  y = mean_mq, 
+  bf.message = FALSE, 
+  pairwise.comparisons = FALSE,
+  package = "ggthemes",
+  palette = "Tableau_20",
+  xlab = "BVDV level",
+  ylab = "mean mapping quality"
+)
+```
+
+# n 结论
+
+一些结论：
+
+- kraken2的原理是基于k-mer的序列比对，使用精确的目标病毒基因组建立reference可提升定量精度。
+- kraken2 minimizer使用了近似krakenuniq的统计方式，相比reads count和classified percentage，或许可以更好地反映定性/定量结果。之后如何使用需要进一步调研。
+- 适当调整分析参数，可以降低kraken2的假阳性。
+
+后续计划：
+
+- 将整理kraken2结果的代码加入到pipeline中，包括表格和图。
+- 调研过滤kraken2结果的方式。

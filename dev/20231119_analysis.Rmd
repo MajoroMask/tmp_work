@@ -1,0 +1,613 @@
+---
+title: "Yet Another Analysis"
+date: "`r Sys.Date()`"
+author: "You-know-who"
+output:
+  rmdformats::robobook:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r magic}
+a <- new.env(parent = emptyenv())
+a$path_project <- "~/proj/tmp_work/"
+a$pwd <- "/data1/suna/work/tmp_work/20231119_analysis"
+
+# renv::activate(a$path_project)
+
+suppressPackageStartupMessages(library(glue))
+suppressPackageStartupMessages(library(ComplexUpset))
+suppressPackageStartupMessages(library(ggpie))
+suppressPackageStartupMessages(library(ggbeeswarm))
+# suppressPackageStartupMessages(library(ggsankey))
+suppressPackageStartupMessages(library(ggstatsplot))
+
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vroom))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(fs))
+
+a$pdi <- path(a$pwd, "_i/")
+a$pdo <- path(a$pwd, "_o/")
+dir_create(a$pdi)
+dir_create(a$pdo)
+```
+
+```{r renderHTML, include=FALSE, eval=FALSE}
+rmarkdown::render(
+  "~/proj/tmp_work/bin/20231119_analysis.Rmd",
+  output_file = "report.html",
+  output_dir = a$pdo,
+  knit_root_dir = a$pwd
+)
+```
+
+```{r init, include=FALSE}
+## Global options
+
+a$font_family <- "sarasa-term-sc-nerd-regular"
+a$font_regular <-
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>%
+  path_real()
+sysfonts::font_add(
+  family = a$font_family,
+  regular = a$font_regular
+)
+showtext::showtext_auto()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  cache = FALSE,
+  prompt = FALSE,
+  tidy = FALSE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 16,
+  fig.height = 8
+)
+knitr::opts_knit$set(width = 160)
+```
+
+```{r ggplot_theme, include=FALSE, eval=FALSE}
+my_theme <-
+  ggthemes::theme_calc() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(family = a$font_family),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+old_theme <- theme_set(my_theme)
+```
+
+```{r utils}
+#' gsa
+#'
+#' group_by() %>% summarise() %>% arrange()
+#'
+#' @inheritParams dplyr::group_by
+#' @return A tibble.
+#'
+#' @export
+#'
+gsa <- function(.data, ..., .sort = TRUE) {
+  requireNamespace("dplyr", quietly = TRUE)
+  .data %>%
+    group_by(...) %>%
+    tally(sort = .sort) %>%
+    ungroup() %>%
+    # mutate(pct = round(n / sum(n), digits = 3))
+    mutate(pct = scales::percent(round(n / sum(n), digits = 3)))
+}
+
+pipe_end <- function(x) x
+
+read_xlsx <- function(...) {
+  tb_out <-
+    openxlsx::read.xlsx(...) %>%
+    tibble::as_tibble()
+  return(tb_out)
+}
+```
+
+# 0. 数据
+
+```{r readData}
+tb_ori <- 
+  path(a$pdi, "20231106-MDCK-3-abundance.xlsx") %>% 
+  read_xlsx(sep.names = " ")
+the_three <- c("f2", "f3", "f4")
+the_four <- c("f1", "f2", "f3", "f4")
+```
+
+## 洗数据
+
+```{r washData1}
+tb_total <- 
+  tb_ori %>%
+  rename(
+    acc = Accession,
+    abun_ratio_f2 = `Abundance Ratio: (F2) / (F1)`,
+    abun_ratio_f3 = `Abundance Ratio: (F3) / (F1)`,
+    abun_ratio_f4 = `Abundance Ratio: (F4) / (F1)`,
+    abun_ratio_p_f2 = `Abundance Ratio Adj. P-Value: (F2) / (F1)`,
+    abun_ratio_p_f3 = `Abundance Ratio Adj. P-Value: (F3) / (F1)`,
+    abun_ratio_p_f4 = `Abundance Ratio Adj. P-Value: (F4) / (F1)`,
+    abun_f1 = `Abundance: F1: Sample`,
+    abun_f2 = `Abundance: F2: Sample`,
+    abun_f3 = `Abundance: F3: Sample`,
+    abun_f4 = `Abundance: F4: Sample`,
+    abun_norm_f1 = `Abundances (Normalized): F1: Sample`,
+    abun_norm_f2 = `Abundances (Normalized): F2: Sample`,
+    abun_norm_f3 = `Abundances (Normalized): F3: Sample`,
+    abun_norm_f4 = `Abundances (Normalized): F4: Sample`,
+    found_in_f1 = `Found in Sample: F1: Sample`,
+    found_in_f2 = `Found in Sample: F2: Sample`,
+    found_in_f3 = `Found in Sample: F3: Sample`,
+    found_in_f4 = `Found in Sample: F4: Sample`
+  ) %>% 
+  rename_with(
+    .cols = everything(),
+    .fn = ~ str_to_lower(.x)
+  ) %>% 
+  mutate(
+    across(
+      .cols = starts_with("abun_"),
+      .fn = ~ as.double(.x)
+    )
+  )
+```
+
+```{r washData2}
+tb_total <- 
+  tb_total %>% 
+  mutate(
+    across(
+      starts_with("found_in_"),
+      .fns = ~ (. == "High"),
+      .names = "high_in_{str_replace(.col, 'found_in_', '')}"
+    )
+  ) %>% 
+  mutate(
+    fgrp = 
+      case_when(
+        high_in_f1 & high_in_f2 & high_in_f3 & high_in_f4 ~ "F1234",
+        high_in_f2 & high_in_f3 & high_in_f4 ~ "F234",
+        high_in_f1 & high_in_f2 ~ "F12",
+        high_in_f3 & high_in_f4 ~ "F34",
+        high_in_f1 ~ "F1",
+        TRUE ~ "others"
+      ) %>% 
+      factor(levels = c("F1234", "F234", "F34", "F12", "F1", "others")),
+    .before = 1
+  ) %>% 
+  mutate(
+    pep_score = `sum pep score`,
+    log10_pep_score = log10(pep_score + 1),
+    .after = `sum pep score`
+  ) %>% 
+  mutate(
+    coverage = `coverage [%]`,
+    .after = `coverage [%]`
+  ) %>%
+  mutate(
+    n_uniq_pep = `# unique peptides`,
+    .after = `# unique peptides`
+  ) %>%
+  mutate(
+    n_aa = `# aas`,
+    .after = `# aas`
+  ) %>% 
+  mutate(
+    mw = `mw [kda]`,
+    log10_mw = log10(mw),
+    .after = `mw [kda]`
+  ) %>% 
+  mutate(
+    pi = `calc. pi`,
+    .after = `calc. pi`
+  ) %>% 
+  rowwise() %>% 
+  mutate(
+    mean_abun_norm = mean(c_across(starts_with("abun_norm_")), na.rm = TRUE),
+    log10_mean_abun_norm = log10(mean_abun_norm),
+    .after = abun_norm_f4
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    cut_uniq_pep = cut_number(`# unique peptides`, n = 4),
+    cut_uniq_pep_over_mw = cut_number(`# unique peptides` / mw, n = 4),
+    cut_uniq_pep_over_aa = cut_number(`# unique peptides` / `# aas`, n = 4),
+    .after = `# unique peptides`
+  )
+```
+
+# 1. 分析
+
+前情提要：
+
+- F1、F2、F3、F4样品来自三个连续处理步骤间。
+- 质谱检测时，不同样品的蛋白总量保持一致。
+- `Ratio Fx/F1`:整体分布没有显著差异，同时F2、F3、F4样品的蛋白表达量较F1有一定上调。
+
+猜想：
+
+- 蛋白依据各自其某种性质，在不同步骤间被处理掉。
++ 最有可能的依据蛋白丰度，即分批次处理高丰度蛋白，使得在对比样品间蛋白差异时，高丰度蛋白下调，低丰度蛋白普遍上调。
+
+## 1.1 蛋白不同样品间的检出情况
+
+### 1.1.1 蛋白组间检出差异
+
+```{r addUpset2Total}
+tb_upset <- 
+  tb_total %>% 
+  filter(!contaminant)
+```
+
+数据：
+
+- 四个样品共检出蛋白`r nrow(tb_total)`，其中污染蛋白（n = `r tb_total %>% filter(contaminant) %>% nrow()`）在后续的分析中被剔除，剩余蛋白`r nrow(tb_upset)`个。
+- 定义`Found in Sample: *`的值是`High`，即认为该蛋白在该样品中检出（`high_in_*`）
+
+```{r upsetOrigin, fig.width=5, fig.height=3}
+p_upset_origin <- ComplexUpset::upset(
+  tb_upset,
+  intersect = glue("high_in_{the_four}"),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  width_ratio = 0.2,
+  sort_intersections_by = "degree"
+)
+p_upset_origin
+```
+
+```{r}
+ggsave(
+  p_upset_origin, filename = path(a$pdo, "p_upset_origin.pdf"),
+  height = 6, width = 10
+)
+```
+
+定义：
+
+根据蛋白在样品组间的检出与否，定义以下分组：
+
+- `F1234`：在四组样品中全部鉴定到的蛋白
+- `F234`：在`F1`中未鉴定，在余下三个样品中鉴定到的蛋白
+
+同理，定义`F12`，`F34`和`F1`，共五个分组，蛋白数量如下图所示：
+
+```{r fgrpComposition, fig.width=5, fig.height=5}
+p_donut_fgrp <- 
+  ggplot(tb_upset) +
+  geom_bar(aes(x = 5, fill = fgrp)) +
+  scale_x_continuous(
+    limits = c(0, 6),
+  ) +
+  ggthemes::scale_fill_gdocs(
+    labels = 
+      tb_upset %>% 
+      gsa(fgrp, .sort = FALSE) %>% 
+      mutate(xit = glue("{fgrp} ({n} | {pct})")) %>% 
+      pull(xit),
+    guide = guide_legend(title = "Grouping")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.5, 0.5)
+  ) +
+  coord_polar(theta = "y")
+p_donut_fgrp
+```
+
+```{r}
+ggsave(
+  p_donut_fgrp, filename = path(a$pdo, "p_donut_fgrp.pdf"),
+  height = 5, width = 5
+)
+```
+
+### 1.1.2 不同组间其它统计量比较
+
+在遍历PD给出的诸多统计量后，发现以下信息：
+
+```{r}
+tb_fgrp <- 
+  tb_total %>% 
+  filter(
+    !contaminant, 
+    fgrp != "others"
+  )
+```
+
+```{r batchPlotVsfgrp}
+pdo_vs_fgrp <- path(a$pdo, "vs_fgrp") %>% dir_create()
+
+# vs continuous
+those_vars_c <- c(
+  "pep_score",
+  "log10_pep_score",
+  "coverage",
+  "n_uniq_pep",
+  "n_aa",
+  "mw",
+  "log10_mw",
+  "pi",
+  "mean_abun_norm",
+  "log10_mean_abun_norm"
+)
+l_vs_fgrp_c <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = "fgrp",
+      y = those_vars_c,
+      package = "ggthemes",
+      palette = "gdoc"
+    ),
+    .f = ggbetweenstats
+  ) %>% 
+  set_names(nm = those_vars_c)
+purrr::walk2(
+  .x = l_vs_fgrp_c,
+  .y = those_vars_c,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_fgrp, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+
+# vs discrete
+those_vars_d <- c(
+  "cut_uniq_pep",
+  "cut_uniq_pep_over_aa",
+  "cut_uniq_pep_over_mw"
+)
+l_vs_fgrp_d <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = those_vars_d,
+      y = "fgrp",
+      package = "ggprism",
+      palette = "viridis"
+    ),
+    .f = ggbarstats
+  ) %>% 
+  set_names(nm = those_vars_d)
+purrr::walk2(
+  .x = l_vs_fgrp_d,
+  .y = those_vars_d,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_fgrp, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+```
+
+1. 分子量，蛋白氨基酸数（蛋白长度），等电点分布无显著差异。
+
+```{r upsetTestNodiff, fig.weight=10, fig.height=8}
+p_upset_nodiff <- ComplexUpset::upset(
+  tb_upset,
+  intersect = glue("high_in_{the_four}"),
+  annotations = list(
+    "log10 MW" =
+      ggplot(mapping = aes(y = log10_mw)) +
+      geom_quasirandom(aes(color = log10_mw), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ),
+    "# AA" =
+      ggplot(mapping = aes(y = n_aa)) +
+      geom_quasirandom(aes(color = `calc. pi`), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)),
+    "pI" =
+      ggplot(mapping = aes(y = pi)) +
+      geom_quasirandom(aes(color = pi), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL))
+  ),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    # expand_limits(y = 1100) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  width_ratio = 0.2,
+  sort_intersections_by = "degree"
+)
+p_upset_nodiff
+```
+
+```{r}
+ggsave(
+  p_upset_nodiff, filename = path(a$pdo, "p_upset_nodiff.pdf"),
+  height = 8, width = 10
+)
+```
+
+2. 在此前提下，不同组间的Coverage，unique peptides 数，以及蛋白的平均质谱信号强度有显著差异。
+
+- `F1234`的Coverage，unique peptides数，蛋白平均质谱信号强度等指标均显著大于其它几组。
+
+推测:
+
+- `F1234`组为样品处理实验中，与实验无关的蛋白。这部分蛋白在蛋白总体含量中的占比（即ratio to `F1`），可能在`F1 -> F4`的过程中，随着其它蛋白含量的降低而升高。
+- 在`F1 -> F2`的实验步骤中，`F1`组可能被处理掉，所以后续实验中无法检测到。而`F234`组可能是因为实验污染引入，或因为`F1`被处理掉后相对丰度上升，达到检测范围而被检测到。
+- 同理，`F12`组和`F34`组可类比`F1`组和`F234`组，对应的实验步骤是`F2 -> F3`。
+- 理论上`F123`组和`F4`组也可以同理，不过组内蛋白量太少了，可能没法进行后续分析。
+
+```{r donutUniqPepCut}
+p_donut_uniq_pep <- 
+  ggplot(tb_upset) +
+  geom_bar(aes(x = 5, fill = cut_uniq_pep)) +
+  scale_x_continuous(
+    limits = c(0, 6),
+  ) +
+  ggthemes::scale_fill_gdocs(
+    labels = 
+      tb_upset %>% 
+      gsa(cut_uniq_pep, .sort = FALSE) %>% 
+      mutate(xit = glue("{cut_uniq_pep} ({n} | {pct})")) %>% 
+      pull(xit),
+    guide = guide_legend(title = "# Unique peptides group")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.5, 0.5)
+  ) +
+  coord_polar(theta = "y")
+ggsave(
+  p_donut_uniq_pep, filename = path(a$pdo, "p_donut_uniq_pep.pdf"),
+  height = 5, width = 5
+)
+```
+
+```{r upsetTestDiff, fig.weight=10, fig.height=8}
+p_upset_diff <- ComplexUpset::upset(
+  tb_upset,
+  intersect = glue("high_in_{the_four}"),
+  annotations = list(
+    "Coverage %" =
+      ggplot(mapping = aes(y = coverage)) +
+      geom_quasirandom(
+        aes(color = coverage),
+        size = 0.5, na.rm = TRUE
+      ) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ),
+    "# Uniq pep" =
+      ggplot() +
+      geom_bar(
+        aes(fill = cut_uniq_pep),
+        position = position_fill(reverse = TRUE)
+      ) +
+      scale_y_continuous(labels = scales::percent) +
+      scale_fill_viridis_d(guide = guide_legend(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ) +
+      labs(y = "# uniq pep level"),
+    "Abundance (log10)" =
+      ggplot(mapping = aes(y = log10(mean_abun_norm))) +
+      geom_quasirandom(aes(color = log10(mean_abun_norm)), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA, na.rm = TRUE) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      )
+  ),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    # expand_limits(y = 1100) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  width_ratio = 0.2,
+  sort_intersections_by = "degree"
+)
+p_upset_diff
+```
+
+```{r}
+ggsave(
+  p_upset_diff, filename = path(a$pdo, "p_upset_diff.pdf"),
+  height = 8, width = 10
+)
+```
+
+## 1.2 对组间变化趋势进行聚类
+
+```{r washData3}
+# TODO 用plotly，不要用奇怪的东西了……
+
+# tb_sankey <- 
+#   tb_total %>% 
+#   filter(!contaminant) %>% 
+#   select(acc, starts_with("abun_ratio_f")) %>% 
+#   pivot_longer(
+#     cols = -acc
+#   ) %>% 
+#   mutate(
+#     value_new = 
+#       case_when(
+#         is.na(value) ~ "both missing",
+#         near(value, 100) ~ "too big",
+#         near(value, 0.01) ~ "too small",
+#         value >= 1 ~ "up",
+#         value < 1 ~ "down",
+#         TRUE ~ "WTF"
+#       ) %>% 
+#       factor(
+#         levels = c("up", "too big", "too small", "down", "both missing", "WTF")
+#       )
+#   ) %>% pivot_wider(
+#     id_cols = acc, 
+#     names_from = "name",
+#     values_from = "value_new"
+#   ) %>% 
+#   ggsankey::make_long(starts_with("abun_ratio_f"))
+```
+
+```{r plotSankey}
+# p_sankey <- 
+#   ggplot(
+#     tb_sankey, 
+#     mapping = aes(
+#       x = x, 
+#       next_x = next_x, 
+#       node = node, 
+#       next_node = next_node,
+#       fill = factor(node)
+#     ),
+#     color = "black",
+#     linewidth = 1
+#   ) +
+#   geom_sankey() +
+#   scale_fill_manual(
+#     values = c("#d7191c", "#fdae61", "#ffffbf", "#abdda4", "#2b83ba")
+#   ) +
+#   theme_sankey(base_size = 16)
+# p_sankey
+```
+

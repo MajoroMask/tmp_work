@@ -1,0 +1,1449 @@
+---
+title: "yet another analysis"
+date: "`r Sys.Date()`"
+author: "You-know-who"
+output:
+  rmdformats::robobook:
+    code_folding: hide
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r magic}
+a <- new.env(parent = emptyenv())
+a$path_project <- "~/proj/tmp_work/"
+a$pwd <- "~/work/tmp_work/20230506_batch_comare/"
+
+renv::activate(a$path_project)
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vroom))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(fs))
+
+a$pdi <- path(a$pwd, "_i/")
+a$pdo <- path(a$pwd, "_o/")
+dir_create(a$pdi)
+dir_create(a$pdo)
+```
+
+```{r renderHTML, include=FALSE, eval=FALSE}
+rmarkdown::render(
+  "~/proj/tmp_work/bin/20230506_batch_compare.Rmd",
+  output_file = "report.html",
+  output_dir = a$pdo,
+  knit_root_dir = a$pwd
+)
+```
+
+```{r init, include=FALSE}
+## Global options
+
+a$font_family <- "sarasa-term-sc-nerd-regular"
+a$font_regular <- 
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>% 
+  path_real()
+sysfonts::font_add(
+  family = a$font_family,
+  regular = a$font_regular
+)
+showtext::showtext_auto()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  cache = FALSE,
+  prompt = FALSE,
+  tidy = FALSE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 16,
+  fig.height = 8
+)
+knitr::opts_knit$set(width = 160)
+```
+
+```{r magic_bioinfo_related}
+a$kraken2_report_colnames <-
+  c("pct", "n_reads", "n_root", "tax_lvl", "tax_id", "name")
+```
+
+
+```{r ggplot_theme}
+my_theme <- 
+  ggthemes::theme_calc() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(family = a$font_family),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+old_theme <- theme_set(my_theme)
+```
+
+```{r utils}
+#' gsa
+#'
+#' group_by() %>% summarise() %>% arrange()
+#'
+#' @inheritParams dplyr::group_by
+#' @return A tibble.
+#'
+#' @export
+#'
+gsa <- function(.data, ..., .sort = TRUE) {
+  requireNamespace("dplyr", quietly = TRUE)
+  .data %>%
+    group_by(...) %>%
+    tally(sort = .sort) %>%
+    ungroup() %>%
+    # mutate(pct = round(n / sum(n), digits = 3))
+    mutate(pct = scales::percent(round(n / sum(n), digits = 3)))
+}
+
+pipe_end <- function(x) x
+```
+
+# 0. 数据
+
+```{r sample_table}
+tb_samples <- 
+  path(a$pdi, "samples.tsv") %>% 
+  vroom(show_col_types = FALSE) %>% 
+  mutate(
+    type = factor(type),
+    batch = factor(batch)
+  )
+# knitr::kable(tb_samples, align = "r")
+```
+
+收集了`r tb_samples$batch %>% unique() %>% length()`组数据的`r nrow(tb_samples)`个样品。
+
+批次：
+
+```{r gsa_batch}
+tb_samples %>% gsa(batch)
+```
+
+样品类型：
+
+```{r gsa_type}
+tb_samples %>% gsa(type)
+```
+
+# 1. 去宿主之后的测序数据量
+
+```{r fastqc}
+read_fastqc_table <- function(tb) {
+  batch <- tb$batch %>% unique() %>% sort()
+  tb_fastqc <- purrr::map_dfr(
+    .x = batch,
+    .f = ~
+      fs::path(a$pdi, .x, "fastqc_results.csv") %>%
+      vroom(show_col_types = FALSE)
+  )
+  tb_out <-
+    tb %>%
+    left_join(
+      y = tb_fastqc,
+      by = c("sample" = "sample_id")
+    )
+  return(tb_out)
+}
+
+tb_qc <- read_fastqc_table(tb_samples)
+# tb_qc
+```
+
+## 1.1 去宿主比例
+
+```{r host_removal}
+read_multiqc_json <- function(tb) {
+  batch <- tb$batch %>% unique() %>% sort()
+  l_multiqc_json <- 
+    purrr::map(
+      batch,
+      .f = ~
+        path(a$pdi, .x, "multiqc", "multiqc_data", "multiqc_data.json") %>% 
+        jsonlite::fromJSON()
+    ) %>% 
+    set_names(nm = batch)
+  return(l_multiqc_json)
+}
+
+format_host_removal_info <- function(l) {
+  tb_host_removal <- 
+    purrr::map_dfr(
+      .x = l,
+      .f = function(l_sub) {
+        tb <- 
+          l_sub$report_plot_data$`host_removal_bargraph-1`$datasets[[1]]$data %>% 
+          set_names(nm = c("kept", "discarded")) %>% 
+          as_tibble() %>% 
+          mutate(
+            sample = 
+              l_sub$report_plot_data$`host_removal_bargraph-1`$samples %>%
+              as.character() %>% 
+              str_remove("\\.host_removed"),
+            .before = 1
+          )
+        return(tb)
+      }
+    ) %>% 
+    mutate(
+      all = kept + discarded,
+      pct = kept / all
+    )
+  return(tb_host_removal)
+}
+
+l_multiqc_json <- read_multiqc_json(tb_samples)
+tb_host_removal <- format_host_removal_info(l_multiqc_json)
+```
+
+```{r plot_host_removal}
+tb_p2 <- 
+  tb_host_removal %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  select(sample, batch, kept, discarded, pct, type) %>% 
+  pivot_longer(
+    cols = c("kept", "discarded"),
+    names_to = "fill",
+    values_to = "y"
+  )
+p2 <- 
+  ggplot() +
+  geom_bar(
+    data = tb_p2,
+    mapping = aes(sample, y, fill = fill),
+    position = "stack", stat = "identity"
+  ) +
+  geom_label(
+    data = tb_p2 %>% filter(fill == "kept"),
+    aes(
+      sample, y, 
+      label = scales::percent(pct, accuracy = 0.1), 
+      colour = type
+    ),
+    size = 5,
+    fontface = "bold",
+    position = position_fill(vjust = 0)
+  ) +
+  scale_y_continuous(n.breaks = 10) +
+  ggthemes::scale_color_calc() +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  theme(
+    legend.title = element_blank()
+  ) +
+  labs(
+    title = "Clean reads 计数，去宿主比例",
+    y = "#reads"
+  )
+```
+
+除`lib112`之外，其它混入宿主细胞的样品，去除宿主reads的比例接近。
+
+```{r p2, fig.cap="去宿主比例", fig.height=6}
+p2
+```
+
+## 1.2 clean reads count
+
+```{r reads_count}
+tb_p1 <-
+  tb_qc %>%
+  select(
+    sample, seq_id, host, batch, type,
+    matches("total_sequence.*trimmed", perl = TRUE)
+  ) %>%
+  rename_with(
+    .cols = matches("total_sequence.*trimmed", perl = TRUE),
+    .fn = ~ str_replace(.x, ".*(read[12]).*", "\\1")
+  ) %>%
+  pivot_longer(
+    cols = c(read1, read2),
+    names_to = "read",
+    values_to = "value"
+  ) %>%
+  mutate(
+    sample = fct_inorder(sample),
+    host = fct_inorder(host)
+  )
+p1_log10 <-
+  ggplot(tb_p1) +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity"
+  ) +
+  scale_y_log10(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    rows = vars(read),
+    cols = vars(batch),
+    scales = "free_x",
+    space = "free"
+  ) +
+  labs(
+    title = "clean reads 计数，对数座标轴",
+    y = "#reads(log10)"
+  )
+p1_regular <-
+  ggplot(tb_p1) +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity"
+  ) +
+  scale_y_continuous(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    rows = vars(read),
+    cols = vars(batch),
+    scales = "free_x",
+    space = "free"
+  ) +
+  labs(
+    title = "clean reads 计数，线性座标轴",
+    y = "#reads"
+  )
+```
+
+- 除`lib112`之外，其它混入宿主细胞的样品（`293T*`，`CHO`），去除宿主后的reads数量级接近。
+- `NTC`和纯质粒样品（`BAV2`，`SBHV2_E6`）测序数据量，去除宿主后reads数量级接近。
+- 以上两个大组之间相比，有数量级的差异，混入宿主细胞的样品，测序数据量约为未混宿主细胞样品数据量的150倍。
+
+```{r p1_regular, fig.cap="质控后reads数"}
+p1_regular
+```
+
+```{r p1_log10, fig.cap="质控后reads数（log10）"}
+p1_log10
+```
+
+不去宿主样品（NTC）和去宿主样品（with_hosts）clean reads数分布比较：
+
+```{r NTC_vs_with_hosts}
+tb_qc %>%
+  select(
+    sample, seq_id, host, batch, type,
+    matches("total_sequence.*trimmed", perl = TRUE)
+  ) %>%
+  rename_with(
+    .cols = matches("total_sequence.*trimmed", perl = TRUE),
+    .fn = ~ str_replace(.x, ".*(read[12]).*", "\\1")
+  ) %>% 
+  mutate(
+    sum = read1 + read2,
+    group = case_when(
+      host == "NTC" ~ "negative",
+      TRUE ~ "positive"
+    )
+  ) %>% 
+  group_by(group) %>% 
+  group_map(.f = ~ summary(.x$sum)) %>% 
+  set_names(nm = c("NTC", "with host(s)"))
+```
+
+# 2 centrifuge：底噪
+
+注：从此处开始，分析的计数单位从`reads`变成`segments`，即PE sequencing的one paird of two  reads是一个segment。
+
+背景：在taxonomy classification分析中，我们并行使用kraken2 + bracken和centrifuge两套工具进行分析。
+
+- 在kraken2结果中，我们看到大比例的segments并没有鉴定到任何的病毒基因组上
++ NTC样品：> 95%
++ 质粒样品：30% ~ 50%
+- centrifuge使用的数据库中包含宏基因组样品常见污染，所以尝试从centrifuge结果中寻找答案
+
+```{r kraken2_unclassified}
+read_kraken2_report <- function(tb) {
+  tb_xit <- 
+    pmap_dfr(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_out <-
+          fs::path(
+            a$pdi, batch, "kraken2", sample, 
+            "kraken2_report.txt"
+          ) %>%
+          vroom::vroom(
+            n_max = 2L,
+            col_names = a$kraken2_report_colnames,
+            show_col_types = FALSE
+          ) %>% 
+          mutate(sample = sample, .before = 1)
+      }
+    )
+  return(tb_xit)
+}
+tb_kraken2_class <- read_kraken2_report(tb_samples)
+```
+
+```{r p9, fig.width=10, fig.height=8}
+tb_p9 <- 
+  tb_kraken2_class %>% 
+  left_join(tb_samples, by = "sample")
+p9 <- 
+  tb_p9 %>% 
+  filter(name == "root") %>% 
+  ggplot() +
+  geom_boxplot(aes(pct / 100, fct_rev(type), fill = type)) +
+  scale_x_continuous(labels = scales::percent, n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  labs(
+    title = "kraken2，归类到病毒的reads比例",
+    y = "", x = ""
+  )
+p9
+```
+
+## 2.1 人源污染
+
+统计centrifuge classification到`Homo sapiens`的segments数量和占比：
+
+```{r centrifuge}
+read_centrifuge_output <- function(tb) {
+  l <-
+    pmap(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_out <-
+          fs::path(a$pdi, batch, "centrifuge", sample, "report.txt") %>%
+          vroom::vroom(show_col_types = FALSE) %>%
+          filter(taxRank == "species") %>%
+          select(
+            name,
+            taxonomy_id = taxID,
+            taxonomy_lvl = taxRank,
+            n_reads = numReads,
+            n_reads_uniq = numUniqueReads,
+            abundance
+          ) %>%
+          rename(
+            "{sample}_num" := n_reads,
+            "{sample}_num_uniq" := n_reads_uniq,
+            "{sample}_frac" := abundance
+          )
+        return(tb_out)
+      }
+    ) %>% 
+    set_names(nm = tb$sample)
+  return(l)
+}
+
+format_centrifuge_output <- function(l, target_tax = "Homo sapiens") {
+  tb_out <- 
+    map2_dfr(
+      .x = l,
+      .y = names(l),
+      .f = ~
+        .x %>%
+        filter(name  == target_tax) %>%
+        rename_with(
+          .cols = matches("_(num|frac)", perl = TRUE),
+          .fn = ~ str_replace(.x, ".*_(num|frac)", "\\1")
+        ) %>%
+        select(name, num, frac) %>% 
+        mutate(sample = .y, .before = 1)
+    )
+  return(tb_out)
+}
+
+read_centrifuge_koutput <- function(tb) {
+  l <-
+    pmap(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_out <-
+          fs::path(a$pdi, batch, "centrifuge", sample, "kreport.txt") %>%
+          vroom::vroom(
+            show_col_types = FALSE, 
+            col_names = a$kraken2_report_colnames
+          ) %>%
+          # filter(tax_lvl == target_tax_lvl) %>%
+          select(
+            name, tax_id, tax_lvl,
+            n_reads, n_root, pct
+          ) %>%
+          rename(
+            "{sample}_num" := n_reads,
+            "{sample}_num_root" := n_root,
+            "{sample}_frac" := pct
+          )
+        return(tb_out)
+      }
+    ) %>% 
+    set_names(nm = tb$sample)
+  return(l)
+}
+
+format_centrifuge_koutput <- function(l) {
+  tb_out <- 
+    map2_dfr(
+      .x = l,
+      .y = names(l),
+      .f = ~
+        .x %>%
+        # filter(name  == target_tax) %>%
+        rename_with(
+          .cols = matches("_(num|frac)$", perl = TRUE),
+          .fn = ~ str_replace(.x, ".*_(num|frac)$", "\\1")
+        ) %>%
+        select(name, tax_lvl, num, frac) %>% 
+        mutate(sample = .y, .before = 1)
+    )
+  return(tb_out)
+}
+
+# l_centrifuge <- read_centrifuge_output(tb_samples)
+# tb_centrifuge_human <-
+#   format_centrifuge_output(l_centrifuge) %>%
+#   left_join(tb_samples, by = "sample")
+# tb_centrifuge_synth <- 
+#   format_centrifuge_output(l_centrifuge, target_tax = "synthetic construct") %>%
+#   left_join(tb_samples, by = "sample")
+
+l_centrifuge_k <- read_centrifuge_koutput(tb_samples)
+tb_centrifuge_all_k <- format_centrifuge_koutput(l_centrifuge_k)
+tb_centrifuge_human_k <-
+  tb_centrifuge_all_k %>% 
+  filter(name == "Homo sapiens") %>% 
+  left_join(tb_samples, by = "sample")
+```
+
+```{r plot_centrifuge_human}
+tb_p3 <-
+  tb_centrifuge_human_k %>%
+  pivot_longer(
+    cols = c(num, frac),
+    names_to = "data_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    sample = fct_inorder(sample),
+    host = fct_inorder(host)
+  )
+
+p3_num_regular <-
+  tb_p3 %>%
+  filter(data_type == "num") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_continuous(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，segment计数，Homo sapiens，线性座标轴",
+    y = "#reads"
+  )
+
+p3_num_log10 <-
+  tb_p3 %>%
+  filter(data_type == "num") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_log10(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，segment计数，Homo sapiens，对数座标轴",
+    y = "#reads"
+  )
+
+p3_frac <-
+  tb_p3 %>%
+  filter(data_type == "frac") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value / 100, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_continuous(labels = scales::percent, n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，segment比例，Homo sapiens",
+    y = "reads fraction"
+  )
+```
+
+- 从segments数量来看，分成三个梯队，同一梯队内样品较为接近，梯队间差异明显
++ 混有人源细胞的样品（293T*）：最多
++ CHO样品（CHO）：较多，占人源细胞样品的20%~50%
++ 未混宿主细胞的样品（NTC和纯质粒）：和前两者是数量级差异
+
+```{r p3_num_regular, fig.cap="classfication中，人源reads数量"}
+p3_num_regular
+```
+
+```{r p3_num_log10, fig.cap="classfication中，人源reads数量（log10）"}
+p3_num_log10
+```
+
+- 从比例上看：
++ 即使经历过宿主去除的步骤，人源样品中归类到人基因组的reads占比还是超过了95%
++ NTC样品的人源reads污染是1e4数量级，占比波动幅度大（10%~90%）
++ CHO样品的人源污染在数量和比例上都介于第二梯队，不妨假设是CHO细胞和人的序列相似性较高导致的
+* `lib112`样品的人源污染数量和其它CHO样品一致，但比例大幅降低（约1/3），和clean reads数增幅一致，说明该样品还有其它污染
+
+```{r p3_frac, fig.cap="classfication中，人源reads占比"}
+p3_frac
+```
+
+## 2.2 WTF is `synthetic construct`?
+
+```{r centrifuge2}
+tb_centrifuge_synth_k <-
+  tb_centrifuge_all_k %>% 
+  filter(name == "synthetic construct") %>% 
+  left_join(tb_samples, by = "sample")
+```
+
+```{r plot_centrifuge_synth}
+tb_p4 <-
+  tb_centrifuge_synth_k %>%
+  pivot_longer(
+    cols = c(num, frac),
+    names_to = "data_type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    sample = fct_inorder(sample),
+    host = fct_inorder(host)
+  )
+
+p4_num_regular <-
+  tb_p4 %>%
+  filter(data_type == "num") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_continuous(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，计数，synthetic construct，线性座标轴",
+    y = "#reads"
+  )
+
+p4_num_log10 <-
+  tb_p4 %>%
+  filter(data_type == "num") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_log10(n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，计数，synthetic construct，对数座标轴",
+    y = "#reads"
+  )
+
+p4_frac <-
+  tb_p4 %>%
+  filter(data_type == "frac") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value / 100, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_continuous(labels = scales::percent, n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，比例，synthetic construct，线性座标轴",
+    y = "reads fraction"
+  )
+```
+
+```{r p4_num_regular, fig.cap="classfication中，synthetic construct reads数量"}
+p4_num_regular
+```
+
+```{r p4_num_log10, fig.cap="classfication中，synthetic construct reads数量（log10）"}
+p4_num_log10
+```
+
+```{r p4_frac, fig.cap="classfication中，synthetic construct reads占比"}
+p4_frac
+```
+
+## 2.3 合并嘞？
+
+```{r combine_human_and_synth}
+tb_p5 <- 
+  bind_cols(
+    tb_p3 %>% rename(human = value),
+    tb_p4 %>% transmute(synth = value)
+  ) %>% 
+  mutate(value = human + synth)
+p5_frac <-
+  tb_p5 %>%
+  filter(data_type == "frac") %>%
+  ggplot() +
+  geom_bar(
+    aes(sample, value / 100, fill = type),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  scale_y_continuous(labels = scales::percent, n.breaks = 10) +
+  ggthemes::scale_fill_tableau() +
+  facet_grid(
+    cols = vars(batch),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "centrifuge，比例，human + synth，线性座标轴",
+    y = "reads fraction"
+  )
+```
+
+```{r p5_frac, fig.cap="classfication中，human + synth reads占比"}
+p5_frac
+```
+
+## 2.4 还有高手？
+
+```{r centrifuge_big_time_hunt}
+big_heads <- 
+  tb_centrifuge_all_k %>% 
+  filter(name == "unclassified" | tax_lvl == "S") %>% 
+  filter(frac >= 0.5) %>% 
+  gsa(name) %>% 
+  pull(name)
+tb_p6 <- 
+  tb_centrifuge_all_k %>% 
+  filter(
+    name %in% big_heads,
+    num >= 10
+  ) %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  mutate(
+    fill = factor(name, levels = big_heads),
+    sample = fct_inorder(sample) %>% fct_rev(),
+    host = fct_inorder(host)
+  )
+```
+
+数据整理：
+
+- 选出reads占比超过单个样品0.5%的所有病毒/条目
+- 当一个病毒在某个样品中reads数小于10时，认为该样品内未检出该病毒
+
+```{r p6, fig.width=10, fig.height=14}
+p6 <- 
+  ggplot() +
+  geom_bar(
+    data = tb_p6,
+    mapping = aes(frac / 100, sample, fill = fill),
+    position = position_stack(reverse = TRUE),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  geom_label(
+    data = 
+      tb_p6 %>% 
+      group_by(sample) %>% 
+      summarise(
+        sum_num = sum(num),
+        sum_frac = sum(frac / 100) %>% scales::percent(accuracy = 0.1),
+        label = glue::glue("{sum_num}|{sum_frac}"),
+        type = type[1],
+        batch = batch[1]
+      ),
+    mapping = aes(
+      y = sample, 
+      label = label,
+      color = batch
+    ),
+    x = 0, hjust = 1, fontface = "bold"
+  ) +
+  scale_x_continuous(
+    n.breaks = 10, 
+    expand = expansion(mult = c(0.15, 0.05))
+  ) +
+  ggthemes::scale_color_tableau(
+    palette = "Jewel Bright", 
+    drop = FALSE,
+    guide = guide_legend(
+      override.aes = list(size = 10)
+    )
+  ) +
+  ggthemes::scale_fill_tableau(palette = "Miller Stone") +
+  facet_grid(
+    rows = vars(type),
+    scales = "free",
+    space = "free"
+  ) +
+  theme(panel.grid.major.x = element_line()) +
+  labs(title = "centrifuge，样品内reads占比分布")
+ggsave(
+  p6, filename = path(a$pdo, "p6.pdf"),
+  height = 16, width = 12, scale = 1.5
+)
+p6
+```
+
+- 注：
++ Ovine mastadenovirus A：即BAV-2，BAV-2样品的插入片段
++ Suid herpesvirus 2：SBHV2样品的插入片段
+
+首先：
+
+- BAV2和SBHV2样品：大量接头+目标片段
+- lib112样品：异常点，BPV-3 reads数1.1e7，占比32.4%
+
+大肠杆菌检出率 46.3% (n=31)，不同样品类型间有一定差异：
+
+```{r centri_posrate_ecoli}
+get_posrate_table <- function(tb, target) {
+  tb_out <- 
+    tb_p6 %>% 
+    group_by(type) %>% 
+    summarise(
+      n = unique(sample) %>% length(),
+      n_pos = sum(str_detect(name, regex(target, ignore_case = TRUE))),
+      pct = scales::percent(n_pos / n, accuracy = 0.1),
+      reads_mean = 
+        num[str_detect(name, regex(target, ignore_case = TRUE))] %>% 
+        mean(),
+      reads_median = 
+        num[str_detect(name, regex(target, ignore_case = TRUE))] %>% 
+        median()
+    ) %>% 
+    filter(n_pos > 0)
+  return(tb_out)
+}
+
+tb_centri_ecoli <- get_posrate_table(tb_p6, target = "Escherichia coli")
+knitr::kable(tb_centri_ecoli)
+```
+
+BPV-3：
+
+```{r centri_posrate_BPV3}
+tb_centri_BPV3 <- 
+  get_posrate_table(tb_p6, target = "Bovine parainfluenza virus 3")
+knitr::kable(tb_centri_BPV3)
+```
+
+Parainfluenza virus 5：犬副流感病毒
+
+```{r centri_posrate_CPV5}
+tb_centri_CPV5 <- 
+  get_posrate_table(tb_p6, target = "Parainfluenza virus 5")
+knitr::kable(tb_centri_CPV5)
+```
+
+Pseudomonas aeruginosa：铜绿假单胞菌
+
+```{r centri_posrate_pa1}
+tb_centri_pa1 <- 
+  get_posrate_table(tb_p6, target = "^Pseudomonas aeruginosa$")
+knitr::kable(tb_centri_pa1)
+tb_centri_pa2 <- 
+  get_posrate_table(tb_p6, target = "Pseudomonas aeruginosa group")
+knitr::kable(tb_centri_pa2)
+```
+
+Salmonella enterica：肠道沙门氏菌
+- `NTC-4`样品异常：reads数`r tb_p6 %>% filter(sample == "NTC-4", name == "Salmonella enterica") %>% pull(num)`，占比`r tb_p6 %>% filter(sample == "NTC-4", name == "Salmonella enterica") %>% pull(frac)`
+
+```{r centri_posrate_SE}
+tb_centri_SE <- 
+  get_posrate_table(tb_p6, target = "Salmonella enterica")
+knitr::kable(tb_centri_SE)
+```
+
+# 3. kraken2和bracken
+
+```{r bracken}
+read_bracken_output <- function(tb) {
+  l <-
+    pmap(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_out <-
+          fs::path(
+            a$pdi, batch, "bracken", sample, 
+            glue::glue("{sample}_S.bracken_output.txt")
+          ) %>%
+          vroom::vroom(show_col_types = FALSE) %>%
+          select(
+            name,
+            kraken_assigned_reads,
+            added_reads,
+            new_est_reads,
+            fraction_total_reads
+          ) %>%
+          rename(
+            "num_ori" := kraken_assigned_reads,
+            "num_add" := added_reads,
+            "num" := new_est_reads,
+            "frac" := fraction_total_reads
+          )
+        return(tb_out)
+      }
+    ) %>% 
+    set_names(nm = tb$sample)
+  return(l)
+}
+
+format_bracken_output <- function(l) {
+  tb_out <- 
+    map2_dfr(
+      .x = l,
+      .y = names(l),
+      .f = ~ .x %>% mutate(sample = .y, .before = 1)
+    )
+  return(tb_out)
+}
+
+l_bracken <- read_bracken_output(tb_samples)
+tb_bracken_out <- 
+  reduce(
+    .x = 1:length(l_bracken), 
+    .f = function(x, y) {
+      l_bracken[[y]] %>% 
+        select(name, num, frac) %>% 
+        rename_with(
+          .cols = c(num, frac),
+          .fn = ~ paste0(names(l_bracken)[[y]], "_", .)
+        ) %>% 
+        full_join(x, ., by = "name")
+    },
+    .init = tibble(name = character())
+  ) %>% 
+  mutate(
+    across(
+      .col = ends_with("_num"),
+      .fns = ~ tidyr::replace_na(.x, replace = 0)
+    ),
+    across(
+      .col = ends_with("_frac"),
+      .fns = ~ tidyr::replace_na(.x, replace = 0)
+    )
+  )
+openxlsx::write.xlsx(
+  tb_bracken_out, 
+  file = path(a$pdo, "bracken_all.xlsx"),
+  overwrite = TRUE
+)
+tb_bracken_all <- format_bracken_output(l_bracken)
+```
+
+这里只统计匹配到病毒的reads数，各个样品的reads总数（分母）如下：
+
+```{r bracken_root}
+tb_p10 <- 
+  tb_kraken2_class %>% 
+  filter(name == "root") %>% 
+  left_join(tb_samples, by = "sample")
+p10 <- 
+  ggplot(tb_p10) +
+  geom_bar(
+    aes(sample, y = n_reads, fill = batch),
+    stat = "identity"
+  ) +
+  scale_y_log10(n.breaks = 10) +
+  ggthemes::scale_fill_tableau(palette = "Jewel Bright", drop = FALSE) +
+  facet_grid(
+    cols = vars(type),
+    scales = "free",
+    space = "free"
+  ) +
+  labs(
+    title = "bracken，segments计数，对数座标轴",
+    y = "#reads(log10)"
+  )
+```
+
+```{r p10}
+p10
+```
+
+## 3.1 高频检出病毒
+
+```{r kraken2_big_heads}
+top_guns <- 
+  tb_bracken_all %>% 
+  filter(num_ori >= 50, frac >= 0.01) %>% 
+  gsa(name) %>% 
+  pull(name)
+tb_p11 <- 
+  tb_bracken_all %>% 
+  filter(name %in% top_guns) %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  mutate(
+    fill = factor(name, levels = top_guns),
+    sample = fct_inorder(sample) %>% fct_rev(),
+    host = fct_inorder(host)
+  )
+```
+
+```{r p11, fig.width=10, fig.height=14}
+p11 <- 
+  ggplot() +
+  geom_bar(
+    data = tb_p11,
+    mapping = aes(frac, sample, fill = fill),
+    position = position_stack(reverse = TRUE),
+    stat = "identity",
+    alpha = I(0.9)
+  ) +
+  geom_label(
+    data = 
+      tb_p11 %>% 
+      group_by(sample) %>% 
+      summarise(
+        sum_num = sum(num),
+        sum_frac = sum(frac) %>% scales::percent(accuracy = 0.1),
+        label = glue::glue("{sum_num}|{sum_frac}"),
+        type = type[1],
+        batch = batch[1]
+      ),
+    mapping = aes(
+      y = sample, 
+      label = label,
+      color = batch
+    ),
+    x = 0, hjust = 1, fontface = "bold"
+  ) +
+  scale_x_continuous(
+    n.breaks = 10, 
+    expand = expansion(mult = c(0.15, 0.05))
+  ) +
+  ggthemes::scale_color_tableau(
+    palette = "Jewel Bright", 
+    drop = FALSE,
+    guide = guide_legend(
+      override.aes = list(size = 10)
+    )
+  ) +
+  ggthemes::scale_fill_tableau(palette = "Tableau 20") +
+  facet_grid(
+    rows = vars(type),
+    scales = "free",
+    space = "free"
+  ) +
+  theme(panel.grid.major.x = element_line()) +
+  labs(title = "bracken，样品内reads占比分布")
+ggsave(
+  p11, filename = path(a$pdo, "p11.pdf"),
+  height = 16, width = 12, scale = 1.5
+)
+p11
+```
+
+```{r per_species_view}
+plot_per_species_big_league <- function(tb_data, 
+                                        top_num = 10,
+                                        top_frac = 10,
+                                        plot_title = NULL) {
+  plot_title <- plot_title %||% waiver()
+  big_league_num <- 
+    tb_data %>% 
+    arrange(sample, desc(num)) %>% 
+    group_by(sample) %>% 
+    slice_head(n = top_num) %>% 
+    pull(name) %>% 
+    unique()
+  big_league_frac <- 
+    tb_data %>% 
+    arrange(sample, desc(frac)) %>% 
+    group_by(sample) %>% 
+    slice_head(n = top_frac) %>% 
+    pull(name) %>% 
+    unique()
+  big_league <- c(big_league_num, big_league_frac) %>% unique()
+  
+  tb_strip_label <- 
+    tb_data %>% 
+    filter(name %in% big_league) %>% 
+    full_join(
+      expand_grid(
+        sample = tb_data %>% pull(sample) %>% unique(),
+        name = big_league
+      ),
+      by = c("sample", "name")
+    ) %>% 
+    mutate(frac = replace_na(frac, 0)) %>% 
+    mutate(name = factor(name, levels = big_league)) %>% 
+    arrange(name) %>% 
+    group_by(name) %>% 
+    summarise(
+      mean = mean(frac) %>% scales::percent(accuracy = 0.01),
+      sd = sd(frac) %>% scales::percent(accuracy = 0.01),
+      .groups = "drop"
+    ) %>% 
+    mutate(facet = glue::glue("{name}\n({mean}±{sd})") %>% fct_inorder()) %>% 
+    select(name, facet)
+  
+  tb_p <- 
+    tb_data %>% 
+    filter(name %in% big_league) %>% 
+    left_join(tb_strip_label, by = "name")
+  p <-
+    ggplot(tb_p) +
+    geom_bar(
+      aes(fct_inorder(sample), num, fill = batch),
+      stat = "identity",
+      alpha = I(0.9)
+    ) +
+    scale_y_continuous(n.breaks = 10) +
+    ggthemes::scale_fill_tableau(palette = "Jewel Bright", drop = FALSE) +
+    facet_wrap(
+      facets = vars(facet),
+      scales = "free_y",
+      ncol = 5
+    ) +
+    labs(
+      title = plot_title,
+      x = "", y = "#reads"
+    )
+  return(p)
+}
+```
+
+### 3.1.1 混293T细胞的样品
+
+先从pattern比较一致的`293T*`样品看起：
+
+```{r p12_293T, fig.weight = 16, fig.height=12}
+tb_p12_293T <- 
+  tb_bracken_all %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  filter(str_detect(type, "293T"))
+p12_293T <- plot_per_species_big_league(
+  tb_p12_293T,
+  plot_title = "bracken，293T*，segment计数，线性座标轴"
+)
+p12_293T
+```
+
+### 3.1.2 CHO
+
+- 排除异常点`lib112`：
+
+```{r p12_CHO, fig.weight = 16, fig.height=12}
+tb_p12_CHO <- 
+  tb_bracken_all %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  filter(
+    type == "CHO",
+    sample != "lib112"
+  )
+p12_CHO <- plot_per_species_big_league(
+  tb_p12_CHO,
+  top_num = 10, top_frac = 10,
+  plot_title = "bracken，CHO，segment计数，线性座标轴"
+)
+p12_CHO
+```
+
+### 3.1.3 BAV2
+
+```{r p12_BAV2, fig.weight = 16, fig.height=12}
+tb_p12_BAV2 <- 
+  tb_bracken_all %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  filter(type == "BAV2")
+p12_BAV2 <- plot_per_species_big_league(
+  tb_p12_BAV2,
+  top_num = 12, top_frac = 10,
+  plot_title = "bracken，BAV2，segment计数，线性座标轴"
+)
+p12_BAV2
+```
+
+### 3.1.4 SBHV2
+
+```{r p12_SBHV2, fig.weight = 16, fig.height=12}
+tb_p12_SBHV2 <- 
+  tb_bracken_all %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  filter(type == "SBHV2")
+p12_SBHV2 <- plot_per_species_big_league(
+  tb_p12_SBHV2,
+  top_num = 10, top_frac = 10,
+  plot_title = "bracken，SBHV2，segment计数，线性座标轴"
+)
+p12_SBHV2
+```
+
+### 3.1.5 NTC
+
+```{r p12_NTC, fig.weight = 16, fig.height=12}
+tb_p12_NTC <- 
+  tb_bracken_all %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  filter(type == "NTC")
+p12_NTC <- plot_per_species_big_league(
+  tb_p12_NTC,
+  top_num = 5, top_frac = 5,
+  plot_title = "bracken，NTC，segment计数，线性座标轴"
+)
+ggsave(
+  p12_NTC, filename = path(a$pdo, "p12_NTC.pdf"),
+  height = 12, width = 16, scale = 2
+)
+p12_NTC
+```
+
+# 4. 目标片段覆盖情况统计
+
+使用bbmap进行序列比对，统计样品中插入片段的覆盖情况。
+
+## 4.1 BAV2
+
+只选取有`BAV2`质粒的样品进行分析。
+
+- 所有样品对`BAV2`质粒的覆盖度都达到100%
+- 未混293T细胞的样品，测序深度明显超过混293T的样品
+
+```{r bbmap_cov_BAV2}
+read_bbmap_covstat <- function(tb) {
+  tb_out <-
+    pmap_dfr(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_sub <-
+          fs::path(
+            a$pdi, batch, "bbmap_covstat", sample, 
+            glue::glue("{sample}_covstats.txt")
+          ) %>%
+          vroom::vroom(show_col_types = FALSE) %>%
+          rename(seq = `#ID`) %>% 
+          mutate(sample = sample, .before = 1)
+        return(tb_sub)
+      }
+    )
+  return(tb_out)
+}
+
+tb_bbmap_cov_BAV2 <- 
+  tb_samples %>% 
+  filter(str_detect(type, "BAV2")) %>% 
+  read_bbmap_covstat()
+```
+
+```{r plot_bbmap_covstat_BAV2}
+tb_p8 <- 
+  tb_bbmap_cov_BAV2 %>% 
+  select(sample, Avg_fold, Covered_percent, Std_Dev) %>% 
+  rename_with(.fn = str_to_lower) %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  mutate(sample = sample %>% fct_inorder() %>% fct_rev()) %>%
+  pipe_end()
+p8 <- 
+  ggplot(tb_p8) +
+  geom_bar(
+    aes(sample, avg_fold, fill = type),
+    stat = "identity"
+  ) +
+  geom_errorbar(
+    aes(
+      sample, y = avg_fold, color = type,
+      ymin = avg_fold - 1, 
+      ymax = avg_fold + std_dev
+    ),
+    width = 0.4
+  ) +
+  geom_label(
+    aes(
+      sample, y = 0,
+      label = scales::percent(covered_percent / 100, accuracy = 0.1),
+      color = type
+    ),
+    size = 8, 
+    hjust = 1,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.05))) +
+  ggthemes::scale_color_tableau(drop = FALSE) +
+  ggthemes::scale_fill_tableau(drop = FALSE) +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(type),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme(
+    panel.grid.major.x = element_line()
+  ) +
+  coord_flip() +
+  labs(
+    title = "bbmap covstat，BAV2",
+    x = "average coverage",
+    y = ""
+  )
+```
+
+```{r p8}
+p8
+```
+
+## 4.2 SBHV2_E6
+
+```{r bbmap_cov_SBHV2_E6}
+read_bbmap_covstat <- function(tb) {
+  tb_out <-
+    pmap_dfr(
+      .l = tb %>% select(batch, sample),
+      .f = function(batch, sample) {
+        tb_sub <-
+          fs::path(
+            a$pdi, batch, "bbmap_covstat", sample, 
+            glue::glue("{sample}_covstats.txt")
+          ) %>%
+          vroom::vroom(show_col_types = FALSE) %>%
+          rename(seq = `#ID`) %>% 
+          mutate(sample = sample, .before = 1)
+        return(tb_sub)
+      }
+    )
+  return(tb_out)
+}
+
+tb_bbmap_covstat <- 
+  tb_samples %>% 
+  filter(str_detect(type, "SBHV2")) %>% 
+  read_bbmap_covstat()
+```
+
+```{r plot_bbmap_covstat}
+tb_p7 <- 
+  tb_bbmap_covstat %>% 
+  select(sample, Avg_fold, Covered_percent, Std_Dev) %>% 
+  rename_with(.fn = str_to_lower) %>% 
+  left_join(tb_samples, by = "sample") %>% 
+  mutate(sample = sample %>% fct_inorder() %>% fct_rev()) %>% 
+  pipe_end()
+
+p7 <- 
+  ggplot(tb_p7) +
+  geom_bar(
+    aes(sample, avg_fold, fill = type),
+    stat = "identity"
+  ) +
+  geom_errorbar(
+    aes(
+      sample, y = avg_fold, color = type,
+      ymin = avg_fold - 1, 
+      ymax = avg_fold + std_dev
+    ),
+    width = 0.4
+  ) +
+  geom_label(
+    aes(
+      sample, y = 0,
+      label = scales::percent(covered_percent / 100, accuracy = 0.1),
+      color = type
+    ),
+    size = 8, 
+    hjust = 1,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.05))) +
+  ggthemes::scale_color_tableau(drop = FALSE) +
+  ggthemes::scale_fill_tableau(drop = FALSE) +
+  facet_grid(
+    rows = vars(batch),
+    cols = vars(type),
+    scales = "free",
+    space = "free_y"
+  ) +
+  theme(
+    panel.grid.major.x = element_line()
+  ) +
+  coord_flip() +
+  labs(
+    title = "bbmap covstat，SBHV2_E6",
+    x = "average coverage",
+    y = ""
+  )
+```
+
+```{r p7}
+p7
+```
+
+# 99. TODO
+
+- 某样品中某序列的序列覆盖度
++ [x] 检出`Suid betaherpesvirus 2`的样品，对`SBHV2_E6`插入序列的覆盖度
++ [ ] 比对前去重……
+- 对测序深度进行归一化？？？
+
+```{r, eval=FALSE,include=FALSE}
+Salesdata <- 
+  path(a$pdi, "salesforcourse-4fe2kehu.csv") %>% 
+  vroom::vroom()
+df <- 
+  Salesdata %>% 
+  group_by(Month) %>% 
+  filter(Year == 2015) %>% 
+  summarise(sum_rev = sum(Revenue))
+
+```
+
+

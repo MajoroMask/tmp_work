@@ -1,0 +1,25 @@
+
+path2os <- fs::path("~/proj/OncoScience/R")
+
+source(fs::path(path2os, "clicor_pipe.R"))
+source(fs::path(path2os, "clicor_patient_table_generator.R"))
+source(fs::path(path2os, "clicor_correlation_plotter.R"))
+source(fs::path(path2os, "clicor_correlation_detector.R"))
+df_RS68panel_genelist <-
+  fs::path(path2os, "../inst/extdata/RS68panel_genelist.txt") %>%
+  vroom::vroom(show_col_types = FALSE)
+source(fs::path(path2os, "plotutil_barplot_standard.R"))
+source(fs::path(path2os, "plotutil_boxplot_standard.R"))
+source(fs::path(path2os, "plotutil_DMGs_volcano.R"))
+source(fs::path(path2os, "plotutil_ringplot_standard.R"))
+source(fs::path(path2os, "plotutil_scale_fill_base_trans.R"))
+source(fs::path(path2os, "plotutil_scale_fill_mut.R"))
+source(fs::path(path2os, "plotutil_scatterplot_standard.R"))
+source(fs::path(path2os, "plotutil_surv_distributions.R"))
+source(fs::path(path2os, "plotutil_survival_standard.R"))
+source(fs::path(path2os, "plotutil_themes.R"))
+source(fs::path(path2os, "plotutil_violin_standard.R"))
+source(fs::path(path2os, "util_ncase_statistics.R"))
+source(fs::path(path2os, "utilities.R"))
+source(fs::path(path2os, "clicor_get_table_one.R"))
+source(fs::path(path2os, "clicor_output_all_picture.R"))

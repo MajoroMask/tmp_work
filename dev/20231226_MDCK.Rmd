@@ -1,0 +1,2405 @@
+---
+title: "Yet Another Analysis"
+date: "`r Sys.Date()`"
+author: "You-know-who"
+output:
+  rmdformats::robobook:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+editor_options:
+  chunk_output_type: console
+---
+
+```{r init}
+a <- new.env(parent = emptyenv())
+a$path_project <- "~/proj/tmp_work/"
+a$pwd <- "/data1/suna/work/tmp_work/MDCK"
+
+suppressWarnings(dir.create(a$pwd))
+setwd(a$pwd)
+
+# renv::activate(a$path_project)
+
+suppressPackageStartupMessages(library(glue))
+suppressPackageStartupMessages(library(ComplexUpset))
+suppressPackageStartupMessages(library(ggpie))
+suppressPackageStartupMessages(library(ggbeeswarm))
+# suppressPackageStartupMessages(library(ggsankey))
+suppressPackageStartupMessages(library(ggstatsplot))
+suppressPackageStartupMessages(library(ggVennDiagram))
+
+suppressPackageStartupMessages(library(ppclust))
+suppressPackageStartupMessages(library(factoextra))
+suppressPackageStartupMessages(library(cluster))
+suppressPackageStartupMessages(library(fclust))
+
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vroom))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(fs))
+
+a$pdi <- path(a$pwd, "_i/")
+# a$pdo <- path(a$pwd, "_o/")
+a$pdo <- path(a$pwd, "_o_2nd/")
+dir_create(a$pdi)
+dir_create(a$pdo)
+```
+
+```{r renderHTML, include=FALSE, eval=FALSE}
+rmarkdown::render(
+  "~/proj/tmp_work/bin/20231226_analysis.Rmd",
+  output_file = "report.html",
+  output_dir = "/data1/suna/work/tmp_work/20231226_analysis/_o",
+  knit_root_dir = "/data1/suna/work/tmp_work/20231226_analysis"
+)
+```
+
+```{r globalOptions, include=FALSE}
+## Global options
+
+a$font_family <- "sarasa-term-sc-nerd-regular"
+a$font_regular <-
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>%
+  path_real()
+sysfonts::font_add(
+  family = a$font_family,
+  regular = a$font_regular
+)
+showtext::showtext_auto()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  cache = FALSE,
+  prompt = FALSE,
+  tidy = FALSE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 16,
+  fig.height = 8
+)
+knitr::opts_knit$set(width = 160)
+```
+
+```{r ggplot_theme, include=FALSE, eval=FALSE}
+my_theme <-
+  ggthemes::theme_calc() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(family = a$font_family),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+old_theme <- theme_set(my_theme)
+```
+
+```{r utils}
+source("~/proj/tmp_work/bin/activate_os_clicor.R")
+
+#' gsa
+#'
+#' group_by() %>% summarise() %>% arrange()
+#'
+#' @inheritParams dplyr::group_by
+#' @return A tibble.
+#'
+#' @export
+#'
+gsa <- function(.data, ..., .sort = TRUE) {
+  requireNamespace("dplyr", quietly = TRUE)
+  .data %>%
+    group_by(...) %>%
+    tally(sort = .sort) %>%
+    ungroup() %>%
+    # mutate(pct = round(n / sum(n), digits = 3))
+    mutate(pct = scales::percent(round(n / sum(n), digits = 3)))
+}
+
+pipe_end <- function(x) x
+
+read_xlsx <- function(...) {
+  tb_out <-
+    openxlsx::read.xlsx(...) %>%
+    tibble::as_tibble()
+  return(tb_out)
+}
+```
+
+# 0. 数据
+
+```{r magic}
+a$the_five <- c("f1", "f2", "f3", "f4", "f5")
+a$the_is <- "P68082"  # inner standard
+a$the_ha <- "tr"  # 主蛋白的acc
+
+a$fgrp <- c(
+  "F12345",
+  "F2345",
+  # "F345",
+  # "F1",
+  # "F12",
+  "others"
+)
+# a$fgrp_ladders <- c(
+#   "F12345",
+#   "F2345",
+#   "F345",
+#   "F1"
+# )
+a$read_wash_cache <- FALSE
+
+a$the_k <- 5  # FCM模型的cluster个数
+a$membership_cutoff <- 0.5  # 画图的隶属度cutoff
+```
+
+## 洗数据
+
+```{r washData1}
+tb_ori <- 
+  # path(a$pdi, "20240112-MDCK-STD-V5-2.xlsx") %>% 
+  path(a$pdi, "20240112-MDCK-STD-HA-20240129.xlsx") %>% 
+  read_xlsx(sep.names = " ")
+
+if (a$read_wash_cache) {
+  tb_total <- readRDS(path(a$pdo, "tb_total.rds"))
+} else {
+  # 粗洗，改名字
+  tb_total <- 
+    tb_ori %>%
+    # rename sample
+    rename_with(.fn = ~ str_replace(.x, "F96", "F1")) %>% 
+    rename_with(.fn = ~ str_replace(.x, "F97", "F2")) %>% 
+    rename_with(.fn = ~ str_replace(.x, "F98", "F3")) %>% 
+    rename_with(.fn = ~ str_replace(.x, "F100", "F4")) %>% 
+    rename_with(.fn = ~ str_replace(.x, "F99", "F5")) %>% 
+    rename(
+      acc = Accession,
+      abun_ratio_f2 = `Abundance Ratio: (F2) / (F1)`,
+      abun_ratio_f3 = `Abundance Ratio: (F3) / (F1)`,
+      abun_ratio_f4 = `Abundance Ratio: (F4) / (F1)`,
+      abun_ratio_f5 = `Abundance Ratio: (F5) / (F1)`,
+      abun_ratio_p_f2 = `Abundance Ratio Adj. P-Value: (F2) / (F1)`,
+      abun_ratio_p_f3 = `Abundance Ratio Adj. P-Value: (F3) / (F1)`,
+      abun_ratio_p_f4 = `Abundance Ratio Adj. P-Value: (F4) / (F1)`,
+      abun_ratio_p_f5 = `Abundance Ratio Adj. P-Value: (F5) / (F1)`,
+      abun_f1 = `Abundance: F1: Sample`,
+      abun_f2 = `Abundance: F2: Sample`,
+      abun_f3 = `Abundance: F3: Sample`,
+      abun_f4 = `Abundance: F4: Sample`,
+      abun_f5 = `Abundance: F5: Sample`,
+      abun_norm_f1 = `Abundances (Normalized): F1: Sample`,
+      abun_norm_f2 = `Abundances (Normalized): F2: Sample`,
+      abun_norm_f3 = `Abundances (Normalized): F3: Sample`,
+      abun_norm_f4 = `Abundances (Normalized): F4: Sample`,
+      abun_norm_f5 = `Abundances (Normalized): F5: Sample`,
+      found_in_f1 = `Found in Sample: F1: Sample`,
+      found_in_f2 = `Found in Sample: F2: Sample`,
+      found_in_f3 = `Found in Sample: F3: Sample`,
+      found_in_f4 = `Found in Sample: F4: Sample`,
+      found_in_f5 = `Found in Sample: F5: Sample`
+    ) %>% 
+    rename_with(
+      .cols = everything(),
+      .fn = ~ str_to_lower(.x)
+    ) %>% 
+    mutate(
+      across(
+        .cols = starts_with("abun_"),
+        .fn = ~ as.double(.x)
+      )
+    )
+  
+  # 加新变量
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      across(
+        # starts_with("found_in_"),
+        # .fns = ~ (. == "High"),
+        # .names = "high_in_{str_replace(.col, 'found_in_', '')}"
+        matches("^abun_norm_f\\d$"),
+        .fns = ~ !is.na(.x),
+        .names = "pos_in_{str_replace(.col, 'abun_norm_', '')}"
+      )
+    ) %>% 
+    mutate(
+      fgrp_expand = 
+        case_when(
+          pos_in_f1 & pos_in_f2 & pos_in_f3 & pos_in_f4 & pos_in_f5 ~ "F12345",
+          !pos_in_f1 & pos_in_f2 & pos_in_f3 & pos_in_f4 & pos_in_f5 ~ "F2345",
+          !pos_in_f1 & !pos_in_f2 & !pos_in_f3 & !pos_in_f4 & !pos_in_f5 ~ "F",
+          !pos_in_f1 & !pos_in_f2 & pos_in_f3 & pos_in_f4 & pos_in_f5 ~ "F345",
+          pos_in_f1 & !pos_in_f2 & !pos_in_f3 & !pos_in_f4 & !pos_in_f5 ~ "F1",
+          pos_in_f1 & pos_in_f2 & !pos_in_f3 & !pos_in_f4 & !pos_in_f5 ~ "F12",
+          TRUE ~ "others"
+        ) %>% 
+        factor(
+          levels = c("F12345", "F2345", "F", "F345", "F1", "F12", "others")
+        ),
+      fgrp = # short for "f group"
+        case_when(
+          pos_in_f1 & pos_in_f2 & pos_in_f3 & pos_in_f4 & pos_in_f5 ~ "F12345",
+          !pos_in_f1 & pos_in_f2 & pos_in_f3 & pos_in_f4 & pos_in_f5 ~ "F2345",
+          TRUE ~ "others"
+        ) %>% 
+        factor(levels = a$fgrp),
+      .before = 1
+    ) %>% 
+    mutate(
+      unquantified = 
+        !pos_in_f1 & 
+        !pos_in_f2 & 
+        !pos_in_f3 & 
+        !pos_in_f4 & 
+        !pos_in_f5,
+      .after = fgrp
+    ) %>% 
+    mutate(
+      pep_score = `sum pep score`,
+      pep_score_log10 = log10(pep_score + 1),
+      .after = `sum pep score`
+    ) %>% 
+    mutate(
+      coverage = `coverage [%]`,
+      .after = `coverage [%]`
+    ) %>%
+    mutate(
+      n_pep = `# peptides`,
+      .after = `# peptides`
+    ) %>% 
+    mutate(
+      n_psm = `# psms`,
+      .after = `# psms`
+    ) %>% 
+    mutate(
+      n_uniq_pep = `# unique peptides`,
+      .after = `# unique peptides`
+    ) %>%
+    mutate(
+      n_aa = `# aas`,
+      .after = `# aas`
+    ) %>% 
+    mutate(
+      mw = `mw [kda]`,
+      mw_log10 = log10(mw),
+      .after = `mw [kda]`
+    ) %>% 
+    mutate(
+      pi = `calc. pi`,
+      .after = `calc. pi`
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("abun_norm_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .after = abun_norm_f4
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_ratio_f\\d"),
+        .fns = log2,
+        .names = "{.col}_log2"
+      ),
+      .after = abun_ratio_f4
+    ) %>% 
+    rowwise() %>%
+    mutate(
+      mean_abun_norm = mean(c_across(matches("^abun_norm_f\\d$")), na.rm = TRUE),
+      mean_abun_norm_log10 = log10(mean_abun_norm),
+      mean_abun_norm_log10_level = as.factor(floor(mean_abun_norm_log10)),
+      .after = abun_norm_f4_log10
+    ) %>%
+    ungroup() %>%
+    mutate(
+      cut_uniq_pep = cut_number(`# unique peptides`, n = 4),
+      cut_uniq_pep_over_mw = cut_number(`# unique peptides` / mw, n = 4),
+      cut_uniq_pep_over_aa = cut_number(`# unique peptides` / `# aas`, n = 4),
+      .after = `# unique peptides`
+    )
+  
+  # 加relative amount
+  #   用dry protein amount校正回质谱上样前的蛋白量
+  tb_dry_amount <- 
+    path(a$pdi, "prot_dry_amount.txt") %>% 
+    vroom::vroom(show_col_types = FALSE)
+  dry_amount <- tb_dry_amount$amount
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      abun_norm_dry_f1 = abun_norm_f1 * dry_amount[1] / dry_amount[1],
+      abun_norm_dry_f2 = abun_norm_f2 * dry_amount[2] / dry_amount[1],
+      abun_norm_dry_f3 = abun_norm_f3 * dry_amount[3] / dry_amount[1],
+      abun_norm_dry_f4 = abun_norm_f4 * dry_amount[4] / dry_amount[1],
+      abun_norm_dry_f5 = abun_norm_f5 * dry_amount[5] / dry_amount[1],
+      .after = mean_abun_norm_log10_level
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_norm_dry_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .after = abun_norm_dry_f5
+    ) %>% 
+    rowwise() %>%
+    mutate(
+      mean_abun_norm_dry = 
+        mean(c_across(matches("^abun_norm_dry_f\\d$")), na.rm = TRUE),
+      mean_abun_norm_dry_log10 = log10(mean_abun_norm_dry),
+      mean_abun_norm_dry_log10_level = 
+        as.factor(floor(mean_abun_norm_dry_log10)),
+      .after = abun_norm_dry_f5_log10
+    ) %>%
+    ungroup()
+  
+  # 内参
+  #   用top3 unique peptide计算内参的abundance，发现和用total abundance区别不大
+  # tb_pep <- 
+  #   path(a$pdi, "20240112-MDCK-STD-V5-peptide.xlsx") %>% 
+  #   read_xlsx(sep.names = " ")
+  # tb_check_is <- 
+  #   tb_pep %>% 
+  #   filter(
+  #     `# Protein Groups` == 1,
+  #     # `Master Protein Accessions` == the_is
+  #   ) %>% 
+  #   rename_with(.fn = ~ str_replace(.x, "F96", "F1")) %>% 
+  #   rename_with(.fn = ~ str_replace(.x, "F97", "F2")) %>% 
+  #   rename_with(.fn = ~ str_replace(.x, "F98", "F3")) %>% 
+  #   rename_with(.fn = ~ str_replace(.x, "F100", "F4")) %>% 
+  #   rename_with(.fn = ~ str_replace(.x, "F99", "F5")) %>% 
+  #   rename(
+  #     mp_acc = `Master Protein Accessions`,
+  #     annot_seq = `Annotated Sequence`,
+  #     abun_f1 = `Abundance: F1: Sample`,
+  #     abun_f2 = `Abundance: F2: Sample`,
+  #     abun_f3 = `Abundance: F3: Sample`,
+  #     abun_f4 = `Abundance: F4: Sample`,
+  #     abun_f5 = `Abundance: F5: Sample`,
+  #   ) %>% 
+  #   select(
+  #     mp_acc, annot_seq,
+  #     matches("^abun_f\\d$")
+  #   ) %>% 
+  #   pivot_longer(
+  #     cols = matches("^abun_f\\d$"),
+  #     names_to = "sample",
+  #     names_prefix = "abun_",
+  #     values_to = "abun"
+  #   ) %>% 
+  #   group_by(mp_acc, sample) %>% 
+  #   summarise(
+  #     top3_abun = 
+  #       sort(abun, na.last = TRUE, decreasing = TRUE) %>% 
+  #       head(n = 3) %>% 
+  #       sum(na.rm = TRUE),
+  #     drop = 
+  #       sort(abun, na.last = TRUE, decreasing = TRUE) %>% 
+  #       head(n = 3) %>% 
+  #       is.na() %>% 
+  #       any(),
+  #     .groups = "drop"
+  #   ) %>% 
+  #   ungroup()
+  # is_abundance <- 
+  #   tb_check_is %>% 
+  #   filter(mp_acc == a$the_is) %>% 
+  #   arrange(sample) %>% 
+  #   pull(top3_abun)
+  
+  # 用上样量校正过之后的内参abundance
+  is_abundance <- 
+    tb_total %>% 
+    filter(acc == a$the_is) %>% 
+    select(matches("^abun_norm_dry_f\\d$")) %>% 
+    pivot_longer(cols = everything()) %>% 
+    pull(value)
+  
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      abun_norm_is_f1 = abun_norm_dry_f1 / is_abundance[1] * is_abundance[1],
+      abun_norm_is_f2 = abun_norm_dry_f2 / is_abundance[2] * is_abundance[1],
+      abun_norm_is_f3 = abun_norm_dry_f3 / is_abundance[3] * is_abundance[1],
+      abun_norm_is_f4 = abun_norm_dry_f4 / is_abundance[4] * is_abundance[1],
+      abun_norm_is_f5 = abun_norm_dry_f5 / is_abundance[5] * is_abundance[1],
+      .after = mean_abun_norm_dry_log10_level
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_norm_is_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .after = abun_norm_is_f5
+    ) %>% 
+    rowwise() %>%
+    mutate(
+      mean_abun_norm_is = 
+        mean(c_across(matches("^abun_norm_is_f\\d$")), na.rm = TRUE),
+      mean_abun_norm_is_log10 = log10(mean_abun_norm_is),
+      mean_abun_norm_is_log10_level = 
+        as.factor(floor(mean_abun_norm_is_log10)),
+      .after = abun_norm_is_f5_log10
+    ) %>%
+    ungroup()
+  
+  # 用校正过的abundance计算intensity percentaged ratio
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_norm_is_f\\d$"),
+        .fns = ~ .x / sum(.x, na.rm = TRUE),
+        .names = "pct_{.col}"
+      ),
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^pct_abun_norm_is_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .before = found_in_f1
+    ) %>% 
+    rowwise() %>%
+    mutate(
+      pct_mean_abun_norm_is = 
+        mean(c_across(matches("^pct_abun_norm_is_f\\d$")), na.rm = TRUE),
+      pct_mean_abun_norm_is_log10 = log10(pct_mean_abun_norm_is),
+      pct_mean_abun_norm_is_log10_level = 
+        as.factor(floor(pct_mean_abun_norm_is_log10)),
+      .before = found_in_f1
+    ) %>%
+    ungroup() %>% 
+    mutate(
+      pct_abun_ratio_is_f1 = pct_abun_norm_is_f1 / pct_abun_norm_is_f1,
+      pct_abun_ratio_is_f2 = pct_abun_norm_is_f2 / pct_abun_norm_is_f1,
+      pct_abun_ratio_is_f3 = pct_abun_norm_is_f3 / pct_abun_norm_is_f1,
+      pct_abun_ratio_is_f4 = pct_abun_norm_is_f4 / pct_abun_norm_is_f1,
+      pct_abun_ratio_is_f5 = pct_abun_norm_is_f5 / pct_abun_norm_is_f1,
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^pct_abun_ratio_is_f\\d$"),
+        .fns = log2,
+        .names = "{.col}_log2"
+      ),
+      .before = found_in_f1
+    )
+  
+  # update 2024-1-30
+  # 用客户提供的样品体积信息进行校正
+  tb_vol <- 
+    tibble(
+      sample = c("f1", "f2", "f3", "f4", "f5"),
+      conctr = c(NA, 679, 218, 651, 584),
+      volumn = c(600, 60, 65, 13, 9)
+    )
+  # pct化前
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      abun_norm_final_f1 = abun_norm_is_f1 * tb_vol$volumn[1],
+      abun_norm_final_f2 = abun_norm_is_f2 * tb_vol$volumn[2],
+      abun_norm_final_f3 = abun_norm_is_f3 * tb_vol$volumn[3],
+      abun_norm_final_f4 = abun_norm_is_f4 * tb_vol$volumn[4],
+      abun_norm_final_f5 = abun_norm_is_f5 * tb_vol$volumn[5],
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_norm_final_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      abun_ratio_final_f1 = abun_norm_final_f1 / abun_norm_final_f1,
+      abun_ratio_final_f2 = abun_norm_final_f2 / abun_norm_final_f1,
+      abun_ratio_final_f3 = abun_norm_final_f3 / abun_norm_final_f1,
+      abun_ratio_final_f4 = abun_norm_final_f4 / abun_norm_final_f1,
+      abun_ratio_final_f5 = abun_norm_final_f5 / abun_norm_final_f1,
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_ratio_final_f\\d$"),
+        .fns = log2,
+        .names = "{.col}_log2"
+      ),
+      .before = found_in_f1
+    )
+  
+  # pct化后：
+  tb_total <- 
+    tb_total %>% 
+    mutate(
+      across(
+        .cols = matches("^abun_norm_final_f\\d$"),
+        .fns = ~ .x / sum(.x, na.rm = TRUE),
+        .names = "pct_{.col}"
+      ),
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^pct_abun_norm_final_f\\d"),
+        .fns = log10,
+        .names = "{.col}_log10"
+      ),
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      pct_abun_ratio_final_f1 = pct_abun_norm_final_f1 / pct_abun_norm_final_f1,
+      pct_abun_ratio_final_f2 = pct_abun_norm_final_f2 / pct_abun_norm_final_f1,
+      pct_abun_ratio_final_f3 = pct_abun_norm_final_f3 / pct_abun_norm_final_f1,
+      pct_abun_ratio_final_f4 = pct_abun_norm_final_f4 / pct_abun_norm_final_f1,
+      pct_abun_ratio_final_f5 = pct_abun_norm_final_f5 / pct_abun_norm_final_f1,
+      .before = found_in_f1
+    ) %>% 
+    mutate(
+      across(
+        .cols = matches("^pct_abun_ratio_final_f\\d$"),
+        .fns = log2,
+        .names = "{.col}_log2"
+      ),
+      .before = found_in_f1
+    )
+  
+  # 来自UniProt的蛋白注释
+  #   update 2024-01-29：反正没什么用，干脆不加了
+  #   如果需要更新蛋白列表，需要到UniProt下载蛋白列表更新之后的注释信息
+  # a$anno_list <- c(
+  #   "autophage", 
+  #   "cell_proliferation", 
+  #   "cell_metabolism",
+  #   "cell_adhesion"
+  # )
+  # tb_enlist_acc <- 
+  #   purrr::map_dfc(
+  #     a$anno_list,
+  #     .f = function(entry) {
+  #       enlist_acc <- 
+  #         path(a$pdi, glue("idmapping_{entry}.tsv")) %>% 
+  #         vroom::vroom(show_col_types = FALSE) %>% 
+  #         pull(Entry) %>% 
+  #         unique() %>% 
+  #         sort()
+  #       tb_out <- tibble("enlist_{entry}" := tb_total$acc %in% enlist_acc)
+  #       return(tb_out)
+  #     }
+  #   ) %>% 
+  #   mutate(acc = tb_total$acc, .before = 1)
+  # tb_uniprot <- 
+  #   path(a$pdi, "idmapping_2024_01_17.tsv") %>% 
+  #   vroom::vroom(show_col_types = FALSE) %>% 
+  #   rename(acc = From) %>% 
+  #   left_join(tb_enlist_acc, by = "acc") %>% 
+  #   vroom::vroom_write(
+  #     file = path(a$pdo, "uniprot_annot.csv"), 
+  #     delim = ",", na = "-"
+  #   )
+  # tb_total <- 
+  #   tb_total %>% 
+  #   left_join(tb_uniprot, by = "acc")
+  
+  # 过滤
+  tb_total <- 
+    tb_total %>% 
+    filter(
+      n_uniq_pep > 1L,  # unique peptide
+      !contaminant  # 去掉污染
+    )
+  
+  # FCM模型
+  tb_fcm <- 
+    tb_total %>% 
+    filter(fgrp == "F12345") %>% 
+    select(
+      acc, 
+      matches("^pct_abun_ratio_is_f\\d_log2$")
+    ) %>% 
+    na.omit()
+  m_fcm <- 
+    tb_fcm %>% 
+    select(matches("^pct_abun_ratio_is_f\\d_log2$")) %>% 
+    as.matrix() %>% 
+    `rownames<-`(tb_fcm$acc)
+  
+  # fixed init if needed
+  # v0 <- inaparc::kmpp(m_fcm, k = a$the_k)
+  # u0 <- inaparc::imembrand(nrow(m_fcm), k = a$the_k)
+  # run fcm
+  set.seed(24601)
+  res_fcm <- ppclust::fcm(
+    m_fcm, 
+    centers = 5,
+    nstart = 5
+  )
+  
+  # summary(res_fcm)
+  # res_fcm$best.start
+  
+  tb_fcm_cluster <- 
+    tibble(
+      acc = m_fcm %>% rownames(),
+      fcm_cluster = factor(
+        res_fcm$cluster, levels = c(1:a$the_k, "not_included")
+      )
+    ) %>% 
+    left_join(
+      res_fcm$u %>% 
+        as.data.frame() %>% 
+        tibble::rownames_to_column(var = "acc") %>% 
+        as_tibble() %>% 
+        rename_with(
+          .cols = -acc,
+          .fn = ~ str_replace(.x, "Cluster ", "fcm_c")
+        ),
+      by = "acc"
+    ) %>% 
+    left_join(
+      res_fcm$u %>% 
+        as.data.frame() %>% 
+        tibble::rownames_to_column(var = "acc") %>% 
+        as_tibble() %>% 
+        rename_with(
+          .cols = -acc,
+          .fn = ~ str_replace(.x, "Cluster (\\d+)", "fcm_c\\1_lgl")
+        ) %>% 
+        mutate(
+          across(
+            .cols = -acc,
+            .fns = ~ .x > 0.7
+          )
+        ),
+      by = "acc"
+    )
+  tb_total <- 
+    tb_total %>% 
+    left_join(tb_fcm_cluster, by = "acc") %>% 
+    relocate(fcm_cluster, .before = found_in_f1) %>% 
+    mutate(fcm_cluster = replace_na(fcm_cluster, "not_included"))
+  rm(
+    tb_fcm_cluster, 
+    is_abundance, 
+    dry_amount,
+    tb_dry_amount,
+    tb_vol
+    # tb_uniprot,
+    # tb_enlist_acc
+  )
+  
+  # caching
+  saveRDS(tb_total, file = path(a$pdo, "tb_total.rds"))
+  vroom::vroom_write(
+    tb_total, file = path(a$pdo, "tb_total.csv"),
+    delim = ","
+  )
+}
+```
+
+# 1. 分析
+
+前情提要：
+
+- F1、F2、F3、F4、F5样品来自连续处理步骤间，分别为病毒收货液，浓缩液，一次层析液，二次层析液，原液。
+- 质谱检测时，不同样品的蛋白总量保持一致。
+- `Ratio Fx/F1`:整体分布没有显著差异，同时F2、F3、F4样品的蛋白表达量较F1有一定上调。
+
+猜想：
+
+- 蛋白依据各自其某种性质，在不同步骤间被处理掉。
++ 最有可能的依据蛋白丰度，即分批次处理高丰度蛋白，使得在对比样品间蛋白差异时，高丰度蛋白下调，低丰度蛋白普遍上调。
+
+## 1.1 蛋白不同样品间的检出情况
+
+### 1.1.1 蛋白组间检出差异
+
+- 定义`Found in Sample: *`的值是`High`，即认为该蛋白在该样品中检出（`pos_in_*`）
+
+```{r upsetOrigin, fig.width=5, fig.height=3}
+p_upset_origin <- ComplexUpset::upset(
+  tb_total,
+  intersect = glue("pos_in_{a$the_five}"),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  width_ratio = 0.2,
+  # sort_intersections_by = "degree"
+  # sort_intersections = FALSE,
+  sort_sets = FALSE
+)
+p_upset_origin
+```
+
+```{r}
+ggsave(
+  p_upset_origin, filename = path(a$pdo, "p_upset_origin.pdf"),
+  height = 6, width = 16
+)
+```
+
+```{r}
+l_venn <- map(
+  .x = colnames(tb_total) %>% str_subset("pos_in_f"),
+  .f = function(the_col) {
+    str_output <- 
+      tb_total %>% 
+      filter(.data[[the_col]]) %>% 
+      pull(acc)
+    return(str_output)
+  }
+)
+data_venn <- process_data(Venn(l_venn))
+p_penta <-
+  ggplot() +
+  geom_sf(
+    aes(fill = count, group = id),
+    data = venn_region(data_venn),
+    alpha = I(0.5)
+  ) +
+  geom_sf(
+    aes(color = name),
+    data = 
+      venn_setedge(data_venn) %>% 
+      mutate(name = str_replace(name, "Set_", "F")),
+    linewidth = 2,
+    show.legend = TRUE
+  ) +
+  geom_sf_text(
+    aes(label = name), 
+    data = 
+      venn_setlabel(data_venn) %>% 
+      mutate(
+        name = str_replace(name, "Set_", "F")
+      )
+  ) +
+  geom_sf_label(
+    data = venn_region(data_venn),
+    mapping = aes(
+      label = ifelse(
+        count == 0,
+        count,
+        paste0(
+          count, "\n",
+          scales::percent(count / sum(count), accuracy = 0.1)
+        )
+      )
+    ),
+    size = 3.25
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.25)) +
+  scale_fill_gradient(low = "white", high = "#ff0000") +
+  guides(
+    fill = guide_colorbar(title = "prot count"),
+    color = guide_legend(title = "group")
+  ) +
+  ggthemes::scale_color_gdocs() +
+  theme_void()
+p_penta
+```
+
+```{r}
+ggsave(
+  p_penta, filename = path(a$pdo, "p_venn_penta.pdf"),
+  width = 8, height = 6, scale = 1.5
+)
+```
+
+定义：
+
+根据蛋白在样品组间的检出与否，定义以下分组：
+
+- `F12345`：在四组样品中全部鉴定到的蛋白
+- `F2345`：在`F1`中未鉴定，在余下四个样品中鉴定到的蛋白
+
+同理，定义`F345`，`F1`，`F12`，`others`共6个分组，蛋白数量如下图所示：
+
+```{r fgrpComposition, fig.width=5, fig.height=5}
+plot_donut <- function(data, the_var) {
+  tb_p <- 
+    data %>% 
+    transmute(.the_var = as.factor(.data[[the_var]]))
+  p_donut <- 
+    ggplot(tb_p) +
+    geom_bar(aes(x = 5, fill = .the_var)) +
+    scale_x_continuous(limits = c(0, 6)) +
+    ggthemes::scale_fill_gdocs(
+      labels = 
+        tb_p %>% 
+        gsa(.the_var, .sort = FALSE) %>% 
+        mutate(xit = glue("{.the_var} ({n} | {pct})")) %>% 
+        pull(xit),
+      guide = guide_legend(title = "Grouping")
+    ) +
+    theme_void() +
+    theme(
+      legend.position = c(0.5, 0.5)
+    ) +
+    coord_polar(theta = "y")
+  return(p_donut)
+}
+
+p_donut_fgrp <- plot_donut(tb_total, "fgrp_expand")
+# p_donut_fgrp
+p_donut_fgrp_sub <- 
+  tb_total %>% 
+  filter(!is.na(pct_mean_abun_norm_is_log10)) %>% 
+  plot_donut("fgrp_expand")
+```
+
+```{r}
+ggsave(
+  p_donut_fgrp, filename = path(a$pdo, "p_donut_fgrp.pdf"),
+  height = 5, width = 5, scale = 1.25
+)
+ggsave(
+  p_donut_fgrp_sub, filename = path(a$pdo, "p_donut_fgrp_sub.pdf"),
+  height = 5, width = 5, scale = 1.25
+)
+```
+
+## 1.2 clicor
+
+```{r clicor}
+cat_variates <- c(
+  "fgrp",
+  "fgrp_expand",
+  "cut_uniq_pep",
+  "cut_uniq_pep_over_mw",
+  "cut_uniq_pep_over_aa",
+  "mean_abun_norm_log10_level",
+  "mean_abun_norm_is_log10_level",
+  "pct_mean_abun_norm_is_log10_level",
+  # "enlist_autophage",
+  # "enlist_cell_proliferation",
+  # "enlist_cell_metabolism",
+  # "enlist_cell_adhesion",
+  "fcm_cluster",
+  "fcm_c1_lgl",
+  "fcm_c2_lgl",
+  "fcm_c3_lgl",
+  "fcm_c4_lgl",
+  "fcm_c5_lgl"
+)
+con_variates <- c(
+  "pep_score",
+  "pep_score_log10",
+  "coverage",
+  "n_pep",
+  "n_psm",
+  "n_uniq_pep",
+  "n_aa",
+  "mw",
+  "mw_log10",
+  "pi",
+  "mean_abun_norm",
+  "mean_abun_norm_log10",
+  "mean_abun_norm_is",
+  "mean_abun_norm_is_log10",
+  "pct_mean_abun_norm_is",
+  "pct_mean_abun_norm_is_log10",
+  "fcm_c1",
+  "fcm_c2",
+  "fcm_c3",
+  "fcm_c4",
+  "fcm_c5"
+)
+
+clicor_output <- clicor_pipe(
+  clicor_patient = tb_total,
+  clicor_outdir = path(a$pdo, "clicor_total"),
+  output_result_files = TRUE,
+  cat_variates = cat_variates,
+  con_variates = con_variates
+)
+clicor_output_fcm <- clicor_pipe(
+  clicor_patient = tb_total %>% filter(fcm_cluster != "not_included"),
+  clicor_outdir = path(a$pdo, "clicor_fcm"),
+  output_result_files = TRUE,
+  cat_variates = cat_variates,
+  con_variates = con_variates
+)
+```
+
+## 1.2 不同组间其它统计量比较
+
+在遍历PD给出的诸多统计量后，发现以下信息：
+
+```{r}
+tb_fgrp <- tb_total
+```
+
+```{r batchPlotVsfgrp}
+pdo_vs_fgrp <- path(a$pdo, "vs_fgrp") %>% dir_create()
+
+# vs continuous
+those_vars_c <- c(
+  "pep_score",
+  "pep_score_log10",
+  "coverage",
+  "n_pep",
+  "n_psm",
+  "n_uniq_pep",
+  "n_aa",
+  "mw",
+  "mw_log10",
+  "pi",
+  "mean_abun_norm",
+  "mean_abun_norm_log10",
+  "mean_abun_norm_dry",
+  "mean_abun_norm_dry_log10",
+  "mean_abun_norm_is",
+  "mean_abun_norm_is_log10"
+)
+l_vs_fgrp_c <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = "fgrp",
+      y = those_vars_c,
+      type = "np",
+      package = "ggthemes",
+      palette = "gdoc"
+    ),
+    .f = ggbetweenstats
+  ) %>% 
+  set_names(nm = those_vars_c)
+purrr::walk2(
+  .x = l_vs_fgrp_c,
+  .y = those_vars_c,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_fgrp, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+
+# vs discrete
+those_vars_d <- c(
+  "cut_uniq_pep",
+  "cut_uniq_pep_over_aa",
+  "cut_uniq_pep_over_mw"
+)
+l_vs_fgrp_d <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = those_vars_d,
+      y = "fgrp",
+      package = "ggprism",
+      palette = "viridis"
+    ),
+    .f = ggbarstats
+  ) %>% 
+  set_names(nm = those_vars_d)
+purrr::walk2(
+  .x = l_vs_fgrp_d,
+  .y = those_vars_d,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_fgrp, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+```
+
+```{r batchPlotVslog10MeanAbunNorm}
+pdo_vs_abun <- path(a$pdo, "vs_abun") %>% dir_create()
+
+# vs continuous
+those_vars_c <- c(
+  "pep_score",
+  "log10_pep_score",
+  "coverage",
+  "n_pep",
+  "n_psm",
+  "n_uniq_pep",
+  "n_aa",
+  "mw",
+  "log10_mw",
+  "pi",
+  "mean_abun_norm"
+)
+l_vs_fgrp_c <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = "log10_mean_abun_norm_level",
+      y = those_vars_c,
+      type = "np",
+      package = "ggthemes",
+      palette = "gdoc"
+    ),
+    .f = ggbetweenstats
+  ) %>% 
+  set_names(nm = those_vars_c)
+purrr::walk2(
+  .x = l_vs_fgrp_c,
+  .y = those_vars_c,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_abun, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+
+# vs discrete
+those_vars_d <- c(
+  "fgrp",
+  "cut_uniq_pep",
+  "cut_uniq_pep_over_aa",
+  "cut_uniq_pep_over_mw"
+)
+l_vs_fgrp_d <- 
+  purrr::pmap(
+    .l = list(
+      data = list(tb_fgrp),
+      x = those_vars_d,
+      y = "log10_mean_abun_norm_level",
+      package = "ggprism",
+      palette = "viridis"
+    ),
+    .f = ggbarstats
+  ) %>% 
+  set_names(nm = those_vars_d)
+purrr::walk2(
+  .x = l_vs_fgrp_d,
+  .y = those_vars_d,
+  .f = ~ ggsave(
+    .x, filename = path(pdo_vs_abun, glue("{.y}.pdf")),
+    width = 10, height = 8
+  )
+)
+```
+
+```{r playground1, eval=FALSE, include=FALSE}
+ggbetweenstats(
+  tb_fgrp %>% 
+    # filter(fgrp %in% a$fgrp_ladders) %>% 
+    pipe_end(),
+  x = fgrp,
+  y = coverage,
+  # type = "p",  # p for parametric
+  type = "np",  # np for nonparametric
+  # type = "r",  # r for robust
+  # type = "bf",  # bf for bayes factor
+  pairwise.comparisons = TRUE,
+  results.subtitle = TRUE,
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+ggbetweenstats(
+  tb_fgrp %>% 
+    # filter(fgrp %in% a$fgrp_ladders) %>% 
+    pipe_end(),
+  x = fgrp,
+  y = log10_mean_abun_norm,
+  # type = "p",  # p for parametric
+  type = "np",  # np for nonparametric
+  # type = "r",  # r for robust
+  # type = "bf",  # bf for bayes factor
+  pairwise.comparisons = TRUE,
+  results.subtitle = TRUE,
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+tb_total %>% 
+  mutate(
+    xit = "xit",
+    pi_cut = cut_width(pi, width = 1, center = 7.5)
+  ) %>% 
+  ggbarstats(
+    x = pi_cut,
+    y = xit,
+    type = "np",  # np for nonparametric
+    pairwise.comparisons = TRUE,
+    results.subtitle = TRUE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+
+tb_total %>% 
+  select(fgrp, matches("^abun_norm_is_f\\d$")) %>% 
+  pivot_longer(
+    cols = matches("^abun_norm_is_f\\d$"),
+    names_prefix = "abun_norm_is_",
+    names_to = "sample",
+    values_to = "abun"
+  ) %>% 
+  filter(!is.na(abun)) %>% 
+  mutate(abun_level = floor(log10(abun))) %>% 
+  ggbarstats(
+    x = abun_level,
+    y = fgrp,
+    type = "np",  # np for nonparametric
+    pairwise.comparisons = TRUE,
+    results.subtitle = TRUE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+```
+
+1. 分子量，蛋白氨基酸数（蛋白长度），等电点分布无显著差异。
+
+```{r upsetTestNodiff, fig.weight=10, fig.height=8}
+p_upset_nodiff <- ComplexUpset::upset(
+  tb_total,
+  intersect = glue("pos_in_{a$the_five}"),
+  annotations = list(
+    "log10 MW" =
+      ggplot(mapping = aes(y = mw_log10)) +
+      geom_quasirandom(aes(color = mw_log10), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ),
+    "# AA" =
+      ggplot(mapping = aes(y = n_aa)) +
+      geom_quasirandom(aes(color = `calc. pi`), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)),
+    "pI" =
+      ggplot(mapping = aes(y = pi)) +
+      geom_quasirandom(aes(color = pi), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL))
+  ),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    # expand_limits(y = 1100) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  height_ratio = 0.8,
+  width_ratio = 0.2,
+  sort_sets = FALSE
+  # sort_intersections = "descending",
+  # sort_intersections_by = "degree"
+)
+p_upset_nodiff
+```
+
+```{r}
+ggsave(
+  p_upset_nodiff, filename = path(a$pdo, "p_upset_nodiff.pdf"),
+  height = 10, width = 16
+)
+```
+
+2. 在此前提下，不同组间的Coverage，unique peptides 数，以及蛋白的平均质谱信号强度有显著差异。
+
+- `F1234`的Coverage，unique peptides数，蛋白平均质谱信号强度等指标均显著大于其它几组。
+
+推测:
+
+- `F1234`组为样品处理实验中，与实验无关的蛋白。这部分蛋白在蛋白总体含量中的占比（即ratio to `F1`），可能在`F1 -> F4`的过程中，随着其它蛋白含量的降低而升高。
+- 在`F1 -> F2`的实验步骤中，`F1`组可能被处理掉，所以后续实验中无法检测到。而`F234`组可能是因为实验污染引入，或因为`F1`被处理掉后相对丰度上升，达到检测范围而被检测到。
+- 同理，`F12`组和`F34`组可类比`F1`组和`F234`组，对应的实验步骤是`F2 -> F3`。
+- 理论上`F123`组和`F4`组也可以同理，不过组内蛋白量太少了，可能没法进行后续分析。
+
+```{r donutUniqPepCut}
+p_donut_uniq_pep <- 
+  ggplot(tb_total) +
+  geom_bar(aes(x = 5, fill = cut_uniq_pep)) +
+  scale_x_continuous(
+    limits = c(0, 6),
+  ) +
+  ggthemes::scale_fill_gdocs(
+    labels = 
+      tb_total %>% 
+      gsa(cut_uniq_pep, .sort = FALSE) %>% 
+      mutate(xit = glue("{cut_uniq_pep} ({n} | {pct})")) %>% 
+      pull(xit),
+    guide = guide_legend(title = "# Unique peptides group")
+  ) +
+  theme_void() +
+  theme(
+    legend.position = c(0.5, 0.5)
+  ) +
+  coord_polar(theta = "y")
+ggsave(
+  p_donut_uniq_pep, filename = path(a$pdo, "p_donut_uniq_pep.pdf"),
+  height = 5, width = 5
+)
+```
+
+```{r upsetTestDiff, fig.weight=10, fig.height=8}
+p_upset_diff <- ComplexUpset::upset(
+  tb_total,
+  intersect = glue("pos_in_{a$the_five}"),
+  annotations = list(
+    "Coverage %" =
+      ggplot(mapping = aes(y = coverage)) +
+      geom_quasirandom(
+        aes(color = coverage),
+        size = 0.5, na.rm = TRUE
+      ) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ),
+    "# Uniq pep" =
+      ggplot() +
+      geom_bar(
+        aes(fill = cut_uniq_pep),
+        position = position_fill(reverse = TRUE)
+      ) +
+      scale_y_continuous(labels = scales::percent) +
+      scale_fill_viridis_d(guide = guide_legend(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      ) +
+      labs(y = "# uniq pep level"),
+    "Abundance (log10)" =
+      ggplot(mapping = aes(y = log10(mean_abun_norm))) +
+      geom_quasirandom(aes(color = log10(mean_abun_norm)), size = 0.5, na.rm = TRUE) +
+      geom_violin(alpha = I(0.4), linewidth = 0.5, na.rm = TRUE) +
+      geom_boxplot(width = 0.1, outlier.shape = NA, na.rm = TRUE) +
+      scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+      theme(
+        legend.justification = "left",
+        legend.box.just = "left"
+      )
+  ),
+  set_sizes =
+    upset_set_size() + 
+    geom_text(
+      aes(label = after_stat(count)), 
+      hjust = -0.1, stat = 'count', color = "white", size = 4.5
+    ) +
+    # expand_limits(y = 1100) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  height_ratio = 0.8,
+  width_ratio = 0.2,
+  sort_sets = FALSE
+)
+p_upset_diff
+```
+
+```{r}
+ggsave(
+  p_upset_diff, filename = path(a$pdo, "p_upset_diff.pdf"),
+  height = 10, width = 16
+)
+```
+
+## 1.3 
+
+```{r}
+tb_px <- 
+  tb_total %>% 
+  filter(fgrp %in% c("F12345")) %>% 
+  select(acc, matches("^abun_norm_(\\w+_)?f\\d_log10$")) %>% 
+  pivot_longer(
+    cols = -acc,
+    names_to = c("class", "sample"),
+    names_pattern = "abun_norm_(\\w+?)?_?(f\\d)_log10",
+    values_to = "abun_norm_log10"
+  ) %>% 
+  pipe_end()
+ggbetweenstats(
+  data = tb_px %>% filter(class == ""),
+  x = sample,
+  y = abun_norm_log10,
+  type = "np",
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+tb_py <- 
+  tb_total %>% 
+  filter(fgrp %in% c("F12345")) %>%
+  select(acc, matches("^abun_norm_(\\w+_)?f\\d$")) %>% 
+  pivot_longer(
+    cols = -acc,
+    names_to = c("class", "sample"),
+    names_pattern = "abun_norm_(\\w+?)?_?(f\\d)",
+    values_to = "abun_norm"
+  ) %>% 
+  group_by(sample, class) %>%
+  summarise(
+    sum_abun = sum(abun_norm, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ungroup() %>% 
+  pipe_end()
+ggplot(tb_py) +
+  geom_bar(aes(sample, sum_abun), stat = "identity") +
+  facet_wrap(vars(class))
+```
+
+# 2 对组间变化趋势进行聚类
+
+```{r visualizationFCM}
+ppclust::plotcluster(res_fcm)
+
+res_fcm2 <- ppclust::ppclust2(res_fcm, "kmeans")
+factoextra::fviz_cluster(
+  res_fcm2, 
+  data = m_fcm, 
+  ellipse.type = "convex",
+  palette = "jco",
+  repel = TRUE
+)
+
+plot_fcm <- function(res_fcm,
+                     tb_fcm,
+                     membership_cutoff = 0.5,
+                     only_max = FALSE,
+                     mark_ha = FALSE) {
+  tb_tmp <- 
+    res_fcm$u %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "acc") %>% 
+    pivot_longer(
+      cols = -acc,
+      names_to = "cluster",
+      values_to = "membership"
+    ) %>% 
+    left_join(tb_fcm, by = "acc") %>% 
+    mutate(pass_membership_cutoff = membership > membership_cutoff) %>% 
+    pivot_longer(
+      cols = matches("^pct_abun_ratio_is_f\\d_log2$"),
+      names_to = "sample",
+      values_to = "log2_ratio"
+    ) %>% 
+    mutate(
+      sample = str_replace(
+        sample, 
+        "^pct_abun_ratio_is_(f\\d)_log2$", 
+        "\\1/f1"
+      )
+    )
+  if (only_max) {
+    tb_tmp <- 
+      tb_tmp %>% 
+      arrange(desc(membership)) %>% 
+      group_by(acc) %>% 
+      slice_head(n = 5) %>% 
+      ungroup()
+  } else {
+    tb_tmp <- tb_tmp %>% filter(pass_membership_cutoff)
+  }
+  tb_tmp <- 
+    tb_tmp %>% 
+    arrange(membership) %>% 
+    mutate(acc = fct_inorder(acc))
+  tb_cluster_size <- 
+    tb_tmp %>% 
+    group_by(cluster, sample) %>% 
+    summarise(cluster_size = n(), .groups = "drop") %>% 
+    ungroup()
+  tb_output <- 
+    tb_tmp %>% 
+    left_join(
+      .,
+      tb_cluster_size,
+      by = c("cluster", "sample")
+    ) %>% 
+    mutate(strip_label = glue::glue("{cluster}\n(n = {cluster_size})"))
+  # return(tb_output)
+  
+  p_fcm <- 
+    ggplot(tb_output) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_line(
+      aes(sample, log2_ratio, group = acc, color = membership)
+    ) +
+    geom_point(aes(sample, log2_ratio), alpha = I(0.05)) +
+    scale_color_viridis_c() +
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "white")) +
+    facet_wrap(
+      vars(strip_label),
+      labeller = labeller()
+    )
+  
+  if (mark_ha) {
+    tb_ha <- 
+      tb_output %>% 
+      filter(acc == "tr")
+    p_fcm <-
+      p_fcm +
+      geom_line(
+        data = tb_ha,
+        aes(sample, log2_ratio), color = "red", group = 1
+      ) +
+      geom_point(
+        data = tb_ha,
+        aes(sample, log2_ratio), color = "red"
+      ) +
+      facet_wrap(
+        vars(strip_label),
+        labeller = labeller()
+      )
+  }
+  
+  return(p_fcm)
+}
+
+p_fcm_5 <- plot_fcm(
+  res_fcm, 
+  tb_fcm = tb_fcm, 
+  membership_cutoff = 0.8
+)
+p_fcm_5
+
+p_fcm_onlymax <- plot_fcm(
+  res_fcm, 
+  tb_fcm = tb_fcm, 
+  only_max = TRUE
+)
+p_fcm_onlymax
+```
+
+```{r}
+ggsave(
+  p_fcm_5, filename = path(a$pdo, "p_fcm_5.pdf"),
+  width = 8, height = 5
+)
+ggsave(
+  p_fcm_onlymax, filename = path(a$pdo, "p_fcm_onlymax.pdf"),
+  width = 8, height = 5
+)
+```
+
+# 10 PPT配图
+
+```{r PPT01}
+tb_ppt01 <- 
+  path(a$pdi, "prot_dry_amount.txt") %>% 
+  vroom::vroom(show_col_types = FALSE) %>% 
+  mutate(amount = amount * 100)
+p_ppt01 <- 
+  ggplot(tb_ppt01) +
+  geom_bar(aes(sample, amount, fill = sample), stat = "identity") +
+  geom_label(aes(sample, amount - 20, label = amount)) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  theme_bw() +
+  labs(y = "amount (ug)")
+ggsave(
+  p_ppt01, filename = path(a$pdo, "ppt01.pdf"),
+  width = 5, height = 5
+)
+```
+
+```{r PPT02}
+tb_ppt02 <- 
+  tb_total %>% 
+  select(acc, matches("^abun_norm_is_f\\d$")) %>% 
+  pivot_longer(
+    cols = -acc,
+    names_to = "sample",
+    names_prefix = "abun_norm_is_",
+    values_to = "abun_norm_is"
+  ) %>% 
+  group_by(sample) %>% 
+  summarise(sum_abun_norm_is = sum(abun_norm_is, na.rm = TRUE)) %>% 
+  ungroup()
+p_ppt02 <- 
+  ggplot(tb_ppt02) +
+  geom_bar(aes(sample, sum_abun_norm_is, fill = sample), stat = "identity") +
+  geom_label(
+    aes(
+      sample, sum_abun_norm_is - 2e10, 
+      label = scales::scientific(sum_abun_norm_is)
+    )
+  ) +
+  ggthemes::scale_fill_gdocs(guide = "none") +
+  theme_bw() +
+  labs(y = "Normalized intensity")
+ggsave(
+  p_ppt02, filename = path(a$pdo, "ppt02.pdf"),
+  width = 5, height = 5
+)
+```
+
+```{r PPT03}
+p_ppt03 <- 
+  ggbetweenstats(
+    data = tb_total,
+    x = fgrp_expand,
+    y = pct_mean_abun_norm_is_log10,
+    type = "np",
+    pairwise.comparisons = FALSE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+ggsave(
+  p_ppt03, filename = path(a$pdo, "ppt03.pdf"),
+  width = 8, height = 5
+)
+```
+
+```{r PPT04}
+tb_ppt04 <- 
+  tb_total %>% 
+  filter(!is.na(pct_mean_abun_norm_is_log10)) %>% 
+  select(acc, fgrp_expand, matches("^abun_norm_is_f\\d$")) %>% 
+  pivot_longer(
+    cols = matches("^abun_norm_is_f\\d$"),
+    names_prefix = "abun_norm_is_",
+    names_to = "sample",
+    values_to = "abun_norm_is"
+  ) %>% 
+  group_by(sample, fgrp_expand) %>% 
+  summarise(
+    sum_up = sum(abun_norm_is, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  ungroup()
+tb_ppt04_label <- 
+  tb_ppt04 %>% 
+  group_by(sample) %>% 
+  group_map(
+    .f = ~
+      tibble(
+        sample = .x$sample[1],
+        y = .x %>% pull(sum_up) %>% sum() %>% `/`(2),
+        label = scales::percent(
+          (.x %>% filter(fgrp_expand == "F12345") %>% pull(sum_up)) / 
+            (.x %>% pull(sum_up) %>% sum()),
+          accuracy = 0.1
+        )
+      ),
+    .keep = TRUE
+  ) %>% 
+  bind_rows()
+p_ppt04 <- 
+  ggplot(tb_ppt04) +
+  geom_bar(aes(sample, sum_up, fill = fgrp_expand), stat = "identity") +
+  geom_label(
+    data = tb_ppt04_label, 
+    mapping = aes(sample, y, label = label)
+  ) +
+  ggthemes::scale_fill_gdocs() +
+  theme_bw()
+ggsave(
+  p_ppt04, filename = path(a$pdo, "ppt04.pdf"),
+  width = 5, height = 5
+)
+```
+
+```{r PPT05}
+tb_ppt05 <- 
+  tb_total %>% 
+  filter(fgrp == "F12345") %>% 
+  select(acc, matches("^pct_abun_norm_is_f\\d_log10$")) %>% 
+  pivot_longer(
+    cols = -acc,
+    names_to = "sample",
+    names_pattern = "pct_abun_norm_is_(f\\d)_log10",
+    values_to = "pct_abun_norm_is_log10"
+  )
+p_ppt05 <-   
+  ggbetweenstats(
+    data = tb_ppt05,
+    x = sample,
+    y = pct_abun_norm_is_log10,
+    type = "np",
+    pairwise.comparisons = FALSE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+ggsave(
+  p_ppt05, filename = path(a$pdo, "ppt03.pdf"),
+  width = 8, height = 5
+)
+```
+
+```{r PPT06}
+tb_ppt06 <- 
+  tb_total %>% 
+  filter(fgrp == "F12345") %>% 
+  select(
+    acc, 
+    mean_abun_norm_is_log10,
+    matches("^pct_abun_ratio_is_f[2345]_log2$")
+  ) %>% 
+  pivot_longer(
+    cols = c(-acc, -mean_abun_norm_is_log10),
+    names_to = "sample",
+    names_pattern = "pct_abun_ratio_is_(f\\d)_log2",
+    values_to = "pct_abun_ratio_is_log2"
+  ) %>% 
+  mutate(
+    sample = 
+      glue::glue("{sample} / f1") %>% 
+      factor(levels = glue::glue("f{1:5} / f1"))
+  )
+p_ppt06 <-
+  ggplot(tb_ppt06) +
+  geom_vline(xintercept = 0, color = "red") +
+  ggpointdensity::geom_pointdensity(
+    aes(
+      x = pct_abun_ratio_is_log2, 
+      y = mean_abun_norm_is_log10
+    )
+  ) +
+  scale_color_viridis_c() +
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white")) +
+  facet_wrap(vars(sample))
+ggsave(
+  p_ppt06, filename = path(a$pdo, "ppt06.pdf"),
+  width = 12, height = 8
+)
+```
+
+```{r PPT07}
+p_ppt07 <- 
+  ggbetweenstats(
+    tb_total %>% 
+      filter(fgrp == "F12345"),
+    x = fcm_cluster,
+    y = pi,
+    # type = "p",  # p for parametric
+    type = "np",  # np for nonparametric
+    # type = "r",  # r for robust
+    # type = "bf",  # bf for bayes factor
+    pairwise.comparisons = TRUE,
+    results.subtitle = TRUE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+ggsave(
+  p_ppt07, filename = path(a$pdo, "ppt07.pdf"),
+  width = 10, height = 6
+)
+```
+
+```{r PPT08}
+p_ppt08 <- 
+  ggbetweenstats(
+    tb_total %>% 
+      filter(fgrp == "F12345"),
+    x = fcm_cluster,
+    y = mean_abun_norm_is_log10,
+    # type = "p",  # p for parametric
+    type = "np",  # np for nonparametric
+    # type = "r",  # r for robust
+    # type = "bf",  # bf for bayes factor
+    pairwise.comparisons = TRUE,
+    results.subtitle = TRUE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+ggsave(
+  p_ppt08, filename = path(a$pdo, "ppt08.pdf"),
+  width = 10, height = 6
+)
+```
+
+```{r PPT09}
+tb_ppt09 <- 
+  tb_total %>% 
+  select(acc, matches("^abun_ratio_f\\d_log2$")) %>% 
+  pivot_longer(
+    cols = matches("^abun_ratio_f\\d_log2$"),
+    names_to = "sample",
+    values_to = "abun_ratio_log2"
+  ) %>% 
+  mutate(sample = str_replace(sample, "abun_ratio_(\\w+)_log2", "\\1"))
+p_ppt09 <- 
+  ggbetweenstats(
+    tb_ppt09,
+    x = sample,
+    y = abun_ratio_log2,
+    # type = "p",  # p for parametric
+    type = "np",  # np for nonparametric
+    # type = "r",  # r for robust
+    # type = "bf",  # bf for bayes factor
+    pairwise.comparisons = FALSE,
+    results.subtitle = FALSE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+ggsave(
+  p_ppt09, filename = path(a$pdo, "ppt09.pdf"),
+  width = 10, height = 6
+)
+```
+
+```{r}
+ggbetweenstats(
+  tb_total %>% 
+    filter(fgrp == "F12345"),
+  x = fcm_cluster,
+  y = pct_mean_abun_norm_is_log10,
+  # type = "p",  # p for parametric
+  type = "np",  # np for nonparametric
+  # type = "r",  # r for robust
+  # type = "bf",  # bf for bayes factor
+  pairwise.comparisons = TRUE,
+  results.subtitle = TRUE,
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+ggbarstats(
+  tb_total %>% filter(fgrp == "F12345"),
+  x = pct_mean_abun_norm_is_log10,
+  y = fcm_cluster,
+  # type = "p",  # p for parametric
+  type = "np",  # np for nonparametric
+  # type = "r",  # r for robust
+  # type = "bf",  # bf for bayes factor
+  pairwise.comparisons = TRUE,
+  results.subtitle = TRUE,
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+ggbarstats(
+  tb_total %>% filter(fgrp == "F12345"),
+  x = pct_mean_abun_norm_is_log10_level,
+  y = fcm_cluster,
+  # type = "p",  # p for parametric
+  type = "np",  # np for nonparametric
+  # type = "r",  # r for robust
+  # type = "bf",  # bf for bayes factor
+  pairwise.comparisons = TRUE,
+  results.subtitle = TRUE,
+  package = "ggthemes",
+  palette = "gdoc"
+)
+
+tb_total %>% 
+  select(matches("^abun_norm_f\\d_log10$")) %>% 
+  pivot_longer(cols = everything()) %>% 
+  ggbetweenstats(
+    x = name,
+    y = value,
+    # type = "p",  # p for parametric
+    type = "np",  # np for nonparametric
+    # type = "r",  # r for robust
+    # type = "bf",  # bf for bayes factor
+    pairwise.comparisons = TRUE,
+    results.subtitle = TRUE,
+    package = "ggthemes",
+    palette = "gdoc"
+  )
+
+```
+
+# 3 update 2024-01-29
+
+客户提供了新的数据：
+
+- 样品处理阶段间的体积变化
+- 主蛋白的序列（意味着重新搜库）
+
+```{r}
+tb_vol <- 
+  tibble(
+    sample = c("f1", "f2", "f3", "f4", "f5"),
+    conctr = c(NA, 679, 218, 651, 584),
+    volumn = c(600, 60, 65, 13, 9)
+  )
+```
+
+主蛋白的相对含量占比：
+
+```{r PPT10}
+tb_ppt10 <- 
+  tb_total %>% 
+  # filter(fgrp == "F12345") %>% 
+  # select(acc, matches("^abun_norm_is_f\\d$")) %>% 
+  select(acc, matches("^abun_norm_final_f\\d$")) %>% 
+  mutate(grp = if_else(acc == "tr", "HA", "Host")) %>% 
+  pivot_longer(
+    cols = -c(acc, grp),
+    names_to = "sample",
+    # names_pattern = "abun_norm_is_(f\\d)",
+    # values_to = "abun_norm_is"
+    names_pattern = "abun_norm_final_(f\\d)",
+    values_to = "abun_norm_final"
+  ) %>% 
+  group_by(sample, grp) %>% 
+  summarise(abun_norm_final_sum = sum(abun_norm_final, na.rm = TRUE)) %>% 
+  ungroup()
+tb_ppt10_label <- 
+  tb_ppt10 %>% 
+  group_by(sample) %>% 
+  summarise(
+    y = sum(abun_norm_final_sum),
+    label = paste0(
+      scales::percent(abun_norm_final_sum[1] / y, accuracy = 0.1),
+      "\n",
+      scales::scientific(y, digits = 3)
+    )
+  ) %>% 
+  ungroup()
+p_ppt10 <- 
+  ggplot(tb_ppt10) +
+  geom_bar(
+    aes(sample, abun_norm_final_sum, fill = grp),
+    stat = "identity", position = position_stack()
+  ) +
+  geom_label(
+    data = tb_ppt10_label,
+    aes(sample, y, label = label)
+  ) +
+  ggthemes::scale_fill_gdocs(guide = guide_legend(title = NULL)) +
+  theme_bw() +
+  labs(y = "Normalized abundance")
+p_ppt10
+ggsave(
+  p_ppt10, filename = path(a$pdo, "ppt10.pdf"),
+  width = 8, height = 5
+)
+```
+
+```{r PPT11}
+tb_ppt11 <- 
+  tb_total %>% 
+  filter(fgrp == "F12345") %>%
+  select(
+    acc, 
+    mw, mw_log10,
+    matches("^abun_norm_final_f[12345]$")
+  ) %>% 
+  mutate(
+    `f2 / f1` = abun_norm_final_f2 / abun_norm_final_f1,
+    `f3 / f2` = abun_norm_final_f3 / abun_norm_final_f2,
+    `f4 / f3` = abun_norm_final_f4 / abun_norm_final_f3,
+    `f5 / f4` = abun_norm_final_f5 / abun_norm_final_f4,
+  ) %>% 
+  select(-matches("^abun_norm_final_f[12345]$")) %>% 
+  pivot_longer(
+    cols = c(-acc, -mw, -mw_log10),
+    names_to = "sample",
+    values_to = "abun_ratio_final"
+  ) %>% 
+  mutate(
+    abun_ratio_final_log2 = log2(abun_ratio_final)
+  )
+p_ppt11 <-
+  ggplot(tb_ppt11) +
+  geom_vline(xintercept = 0, color = "red") +
+  ggpointdensity::geom_pointdensity(
+    aes(
+      x = abun_ratio_final_log2, 
+      y = mw_log10
+    )
+  ) +
+  scale_color_viridis_c() +
+  theme_bw() +
+  theme(strip.background = element_rect(fill = "white")) +
+  facet_wrap(vars(sample))
+ggsave(
+  p_ppt11, filename = path(a$pdo, "ppt11.pdf"),
+  width = 12, height = 8
+)
+```
+
+## 3.1 用新数据做fcm
+
+用体积校正之后的定量指标构建fcm模型，尝试可视化
+（感觉会完全不一样，但能不能解释呢？）……
+
+```{r}
+tb_fcm_mk3 <- 
+  tb_total %>% 
+  filter(fgrp == "F12345") %>% 
+  select(
+    acc, 
+    matches("^abun_ratio_final_f\\d_log2$")
+  ) %>% 
+  na.omit()
+m_fcm_mk3 <- 
+  tb_fcm_mk3 %>% 
+  select(matches("^abun_ratio_final_f\\d_log2$")) %>% 
+  as.matrix() %>% 
+  `rownames<-`(tb_fcm_mk3$acc)
+
+# fixed init if needed
+# v0 <- inaparc::kmpp(m_fcm, k = a$the_k)
+# u0 <- inaparc::imembrand(nrow(m_fcm), k = a$the_k)
+# run fcm
+set.seed(24601)
+res_fcm_mk3 <- ppclust::fcm(
+  m_fcm_mk3, 
+  centers = 5,
+  nstart = 5
+)
+
+# summary(res_fcm)
+# res_fcm$best.start
+
+p_fcm_5_mk3_onlymax <- 
+  plot_fcm(
+    res_fcm_mk3, 
+    tb_fcm = 
+      tb_fcm_mk3 %>% 
+      rename_with(
+        .cols = matches("^abun_ratio_final_f\\d_log2$"),
+        .fn = ~ str_replace(.x, "abun_ratio_final_", "pct_abun_ratio_is_")
+      ), 
+    # membership_cutoff = 0.5
+    only_max = TRUE,
+    mark_ha = TRUE
+  )
+ggsave(
+  p_fcm_5_mk3_onlymax, filename = path(a$pdo, "p_fcm_5_mk3_onlymax.pdf"),
+  width = 8, height = 5
+)
+```
+
+## 3.2 log2 ratio分布
+
+```{r PPT12}
+p_ppt12 <- 
+  ggstatsplot::grouped_gghistostats(
+    tb_ppt11,
+    x = abun_ratio_final_log2,
+    xlab = "abundance ratio (log2)",
+    binwidth = 0.1,
+    type = "robust",
+    grouping.var = sample,
+    plotgrid.args = list(nrow = 2),
+    results.subtitle = FALSE
+  )
+p_ppt12
+ggsave(
+  p_ppt12, filename = path(a$pdo, "ppt12.pdf"),
+  width = 12, height = 8
+)
+```
+
+```{r ppt13}
+tb_ppt13 <- 
+  tb_ppt11 %>% 
+  filter(sample == "f2 / f1") %>% 
+  mutate(
+    mw_fct = cut_number(mw, n = 5) %>% as.integer()
+  )
+p_ppt13 <- 
+  ggstatsplot::ggscatterstats(
+    tb_ppt13,
+    x = mw_log10,
+    xlab = "MW (log10)",
+    y = abun_ratio_final_log2,
+    ylab = "abundance ratio (log2)",
+    type = "nonparametric",
+    xsidehistogram.args = list(
+      fill = "#009E73", color = "black", 
+      na.rm = TRUE, bins = 50
+    ),
+    ysidehistogram.args = list(
+      fill = "#D55E00", color = "black", 
+      na.rm = TRUE, bins = 50
+    )
+  )
+ggsave(
+  p_ppt13, filename = path(a$pdo, "ppt13.pdf"),
+  width = 8, height = 8
+)
+# ggstatsplot::grouped_gghistostats(
+#   tb_ppt13,
+#   x = abun_ratio_final_log2,
+#   binwidth = 0.1,
+#   type = "robust",
+#   grouping.var = mw_fct,
+#   plotgrid.args = list(nrow = 5)
+# )
+
+# ggplot(tb_ppt13) +
+#   geom_histogram(aes(abun_ratio_final_log2), binwidth = 0.1) +
+#   facet_wrap(vars(mw_fct), ncol = 1) +
+#   theme_bw()
+
+
+ggstatsplot::ggbetweenstats(
+  tb_ppt13,
+  x = mw_fct,
+  y = abun_ratio_final_log2
+)
+
+cat_variates <- c(
+  "fgrp",
+  "fgrp_expand",
+  "cut_uniq_pep",
+  "cut_uniq_pep_over_mw",
+  "cut_uniq_pep_over_aa",
+  "mean_abun_norm_log10_level",
+  "mean_abun_norm_is_log10_level",
+  "pct_mean_abun_norm_is_log10_level",
+  # "enlist_autophage",
+  # "enlist_cell_proliferation",
+  # "enlist_cell_metabolism",
+  # "enlist_cell_adhesion",
+  "fcm_cluster",
+  "fcm_c1_lgl",
+  "fcm_c2_lgl",
+  "fcm_c3_lgl",
+  "fcm_c4_lgl",
+  "fcm_c5_lgl"
+)
+con_variates <- c(
+  "pep_score",
+  "pep_score_log10",
+  "coverage",
+  "n_pep",
+  "n_psm",
+  "n_uniq_pep",
+  "n_aa",
+  "mw",
+  "mw_log10",
+  "pi",
+  "mean_abun_norm",
+  "mean_abun_norm_log10",
+  "mean_abun_norm_is",
+  "mean_abun_norm_is_log10",
+  "pct_mean_abun_norm_is",
+  "pct_mean_abun_norm_is_log10",
+  "abun_ratio_final_f2_log2",
+  "fcm_c1",
+  "fcm_c2",
+  "fcm_c3",
+  "fcm_c4",
+  "fcm_c5"
+)
+
+clicor_output_fcm <- clicor_pipe(
+  clicor_patient = tb_total,
+  clicor_outdir = path(a$pdo, "clicor_test"),
+  output_result_files = TRUE,
+  cat_variates = cat_variates,
+  con_variates = con_variates
+)
+
+```
+
+
+# 99 PG: try fcm
+
+```{r, eval=FALSE, include=FALSE}
+# FCM模型
+tb_fcm <- 
+  tb_total %>% 
+  filter(fgrp == "F12345") %>% 
+  select(
+    acc, 
+    matches("^pct_abun_ratio_is_f\\d_log2$")
+  ) %>% 
+  na.omit()
+m_fcm <- 
+  tb_fcm %>% 
+  select(matches("^pct_abun_ratio_is_f\\d_log2$")) %>% 
+  as.matrix() %>% 
+  `rownames<-`(tb_fcm$acc)
+
+# fixed init if needed
+# v0 <- inaparc::kmpp(m_fcm, k = a$the_k)
+# u0 <- inaparc::imembrand(nrow(m_fcm), k = a$the_k)
+
+# run fcm
+set.seed(24601)
+res_fcm3 <- ppclust::fcm(
+  m_fcm, 
+  centers = 3,
+  nstart = 5
+)
+set.seed(24601)
+res_fcm4 <- ppclust::fcm(
+  m_fcm, 
+  centers = 4,
+  nstart = 5
+)
+set.seed(24601)
+res_fcm5 <- ppclust::fcm(
+  m_fcm, 
+  centers = 5,
+  nstart = 5
+)
+set.seed(24601)
+res_fcm6 <- ppclust::fcm(
+  m_fcm, 
+  centers = 6,
+  nstart = 5
+)
+```
+
+```{r plotFCM, eval=FALSE, include=FALSE}
+plot_fcm <- function(res_fcm,
+                     tb_fcm,
+                     membership_cutoff = 0.5,
+                     only_max = FALSE) {
+  tb_tmp <- 
+    res_fcm$u %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "acc") %>% 
+    pivot_longer(
+      cols = -acc,
+      names_to = "cluster",
+      values_to = "membership"
+    ) %>% 
+    left_join(tb_fcm, by = "acc") %>% 
+    mutate(pass_membership_cutoff = membership > membership_cutoff) %>% 
+    pivot_longer(
+      cols = matches("^pct_abun_ratio_is_f\\d_log2$"),
+      names_to = "sample",
+      values_to = "log2_ratio"
+    ) %>% 
+    mutate(
+      sample = str_replace(
+        sample, 
+        "^pct_abun_ratio_is_(f\\d)_log2$", 
+        "\\1/f1"
+      )
+    )
+  if (only_max) {
+    tb_tmp <- 
+      tb_tmp %>% 
+      arrange(desc(membership)) %>% 
+      group_by(acc) %>% 
+      slice_head(n = 5) %>% 
+      ungroup()
+  } else {
+    tb_tmp <- tb_tmp %>% filter(pass_membership_cutoff)
+  }
+  tb_tmp <- 
+    tb_tmp %>% 
+    arrange(membership) %>% 
+    mutate(acc = fct_inorder(acc))
+  tb_cluster_size <- 
+    tb_tmp %>% 
+    group_by(cluster, sample) %>% 
+    summarise(cluster_size = n(), .groups = "drop") %>% 
+    ungroup()
+  tb_output <- 
+    tb_tmp %>% 
+    left_join(
+      .,
+      tb_cluster_size,
+      by = c("cluster", "sample")
+    ) %>% 
+    mutate(strip_label = glue::glue("{cluster}\n(n = {cluster_size})"))
+  # return(tb_output)
+  
+  p_fcm <- 
+    ggplot(tb_output) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_line(
+      aes(sample, log2_ratio, group = acc, color = membership)
+    ) +
+    geom_point(aes(sample, log2_ratio), alpha = I(0.05)) +
+    scale_color_viridis_c() +
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "white")) +
+    facet_wrap(
+      vars(strip_label),
+      labeller = labeller()
+    )
+  return(p_fcm)
+}
+
+plot_fcm(
+  res_fcm3, 
+  tb_fcm = tb_fcm, 
+  only_max = TRUE
+)
+plot_fcm(
+  res_fcm4, 
+  tb_fcm = tb_fcm, 
+  only_max = TRUE
+)
+plot_fcm(
+  res_fcm5, 
+  tb_fcm = tb_fcm, 
+  only_max = TRUE
+)
+plot_fcm(
+  res_fcm6, 
+  tb_fcm = tb_fcm, 
+  only_max = TRUE
+)
+```
+
+## 尝试不同的颜色
+
+```{r PPT08Dumped, include=FALSE, eval=FALSE}
+plot_fcm_pi <- function(res_fcm,
+                        tb_fcm,
+                        tb_color = NULL,
+                        membership_cutoff = 0.5,
+                        only_max = FALSE) {
+  tb_tmp <- 
+    res_fcm$u %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "acc") %>% 
+    pivot_longer(
+      cols = -acc,
+      names_to = "cluster",
+      values_to = "membership"
+    ) %>% 
+    left_join(tb_fcm, by = "acc") %>% 
+    mutate(pass_membership_cutoff = membership > membership_cutoff) %>% 
+    pivot_longer(
+      cols = matches("^pct_abun_ratio_is_f\\d_log2$"),
+      names_to = "sample",
+      values_to = "log2_ratio"
+    ) %>% 
+    mutate(
+      sample = str_replace(
+        sample, 
+        "^pct_abun_ratio_is_(f\\d)_log2$", 
+        "\\1/f1"
+      )
+    )
+  if (!is.null(tb_color)) {
+    tb_tmp <- 
+      tb_tmp %>% 
+      left_join(tb_color, by = "acc")
+  }
+  if (only_max) {
+    tb_tmp <- 
+      tb_tmp %>% 
+      arrange(desc(membership)) %>% 
+      group_by(acc) %>% 
+      slice_head(n = 5) %>% 
+      ungroup()
+  } else {
+    tb_tmp <- tb_tmp %>% filter(pass_membership_cutoff)
+  }
+  tb_tmp <- 
+    tb_tmp %>% 
+    arrange(membership) %>% 
+    mutate(acc = fct_inorder(acc))
+  tb_cluster_size <- 
+    tb_tmp %>% 
+    group_by(cluster, sample) %>% 
+    summarise(cluster_size = n(), .groups = "drop") %>% 
+    ungroup()
+  tb_p <- 
+    tb_tmp %>% 
+    left_join(
+      .,
+      tb_cluster_size,
+      by = c("cluster", "sample")
+    ) %>% 
+    mutate(strip_label = glue::glue("{cluster}\n(n = {cluster_size})"))
+  if (is.null(tb_color)) {
+    tb_p <- 
+      tb_p %>% 
+      rename(color = membership)
+  }
+  tb_p <- 
+    tb_p %>% 
+    arrange(color) %>% 
+    mutate(acc = fct_inorder(acc))
+  
+  p_fcm <- 
+    ggplot(tb_p) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_line(
+      aes(sample, log2_ratio, group = acc, color = color)
+    ) +
+    geom_point(aes(sample, log2_ratio), alpha = I(0.05)) +
+    scale_color_viridis_c(guide = guide_colorbar(title = NULL)) +
+    theme_bw() +
+    theme(strip.background = element_rect(fill = "white")) +
+    facet_wrap(
+      vars(strip_label),
+      labeller = labeller()
+    )
+  return(p_fcm)
+}
+
+plot_fcm_pi(
+  res_fcm, 
+  tb_fcm = tb_fcm, 
+  tb_color = tb_total %>% select(acc, color = pi),
+  # membership_cutoff = 0.8
+  only_max = TRUE
+)
+```
+
+# Inf dumpsite
+
+```{r washData3}
+# TODO 用plotly，不要用奇怪的东西了……
+
+# tb_sankey <- 
+#   tb_total %>% 
+#   filter(!contaminant) %>% 
+#   select(acc, starts_with("abun_ratio_f")) %>% 
+#   pivot_longer(
+#     cols = -acc
+#   ) %>% 
+#   mutate(
+#     value_new = 
+#       case_when(
+#         is.na(value) ~ "both missing",
+#         near(value, 100) ~ "too big",
+#         near(value, 0.01) ~ "too small",
+#         value >= 1 ~ "up",
+#         value < 1 ~ "down",
+#         TRUE ~ "WTF"
+#       ) %>% 
+#       factor(
+#         levels = c("up", "too big", "too small", "down", "both missing", "WTF")
+#       )
+#   ) %>% pivot_wider(
+#     id_cols = acc, 
+#     names_from = "name",
+#     values_from = "value_new"
+#   ) %>% 
+#   ggsankey::make_long(starts_with("abun_ratio_f"))
+```
+
+```{r plotSankey}
+# p_sankey <- 
+#   ggplot(
+#     tb_sankey, 
+#     mapping = aes(
+#       x = x, 
+#       next_x = next_x, 
+#       node = node, 
+#       next_node = next_node,
+#       fill = factor(node)
+#     ),
+#     color = "black",
+#     linewidth = 1
+#   ) +
+#   geom_sankey() +
+#   scale_fill_manual(
+#     values = c("#d7191c", "#fdae61", "#ffffbf", "#abdda4", "#2b83ba")
+#   ) +
+#   theme_sankey(base_size = 16)
+# p_sankey
+```

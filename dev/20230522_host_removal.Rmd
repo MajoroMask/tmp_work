@@ -1,0 +1,200 @@
+---
+title: "Host removal and shit"
+author: "That guy"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::robobook:
+    code_folding: hide
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    gallery: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r magic}
+a <- new.env(parent = emptyenv())
+a$path_project <- "~/proj/tmp_work/"
+a$pwd <- "/data1/suna/work/tmp_work/20230522_host_removal/"
+setwd(a$pwd)
+
+renv::activate(a$path_project)
+suppressPackageStartupMessages(library(rlang))
+suppressPackageStartupMessages(library(vroom))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(fs))
+
+a$pdi <- path(a$pwd, "_i/") %>% dir_create()
+a$pdo <- path(a$pwd, "_o/") %>% dir_create()
+```
+
+```{r renderHTML, include=FALSE, eval=FALSE}
+rmarkdown::render(
+  path(a$path_project, "bin", "20230522_host_removal.Rmd",
+  output_file = "report.html",
+  output_dir = a$pdo,
+  knit_root_dir = a$pwd
+)
+```
+
+```{r init, include=FALSE}
+a$font_family <- "sarasa-term-sc-nerd-regular"
+a$font_regular <- 
+  path(
+    "/etc", "rstudio", "fonts", "sarasa\ term\ sc\ nerd", "400",
+    "sarasa-term-sc-nerd-regular.ttf"
+  ) %>% 
+  path_real()
+sysfonts::font_add(
+  family = a$font_family,
+  regular = a$font_regular
+)
+showtext::showtext_auto()
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  cache = FALSE,
+  prompt = FALSE,
+  tidy = FALSE,
+  comment = NA,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 16,
+  fig.height = 8
+)
+knitr::opts_knit$set(width = 160)
+```
+
+```{r ggplot_theme}
+my_theme <- 
+  ggthemes::theme_calc() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(family = a$font_family),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.x = element_blank()
+  )
+old_theme <- theme_set(my_theme)
+```
+
+```{r utils}
+#' gsa
+#'
+#' group_by() %>% summarise() %>% arrange()
+#'
+#' @inheritParams dplyr::group_by
+#' @return A tibble.
+#'
+#' @export
+#'
+gsa <- function(.data, ..., .sort = TRUE) {
+  requireNamespace("dplyr", quietly = TRUE)
+  .data %>%
+    group_by(...) %>%
+    tally(sort = .sort) %>%
+    ungroup() %>%
+    # mutate(pct = round(n / sum(n), digits = 3))
+    mutate(pct = scales::percent(round(n / sum(n), digits = 3)))
+}
+
+pipe_end <- function(x) x
+
+xlsx2tb <- function(file, ...) {
+  tb <- openxlsx::read.xlsx(xlsxFile = file, ...) %>% tibble::as_tibble()
+  return(tb)
+}
+```
+
+```{r magic}
+a$pdw <- path("/data1/suna/work/") %>% path_real()
+a$kraken2_report_colnames <-
+  c("pct", "n_reads", "n_root", "tax_lvl", "tax_id", "name")
+```
+
+# 0. 数据
+
+```{r sample_table}
+tb_samples <- 
+  path(a$pdi, "20230522_samples.xlsx") %>% 
+  xlsx2tb() %>% 
+  mutate(
+    host = factor(host) %>% fct_inorder(),
+    type = factor(type) %>% fct_inorder(),
+    group = factor(group)
+  ) %>% 
+  # filter(!(wd == "mag0410_shr" & type == "CHO")) %>%
+  filter(wd != "mag0410_shr") %>%
+  pipe_end()
+```
+
+# 1 NTC样品的去宿主效果
+
+- 之前的
+
+```{r show_tb_ntc}
+tb_ntc <- 
+  tb_samples %>% 
+  filter(type == "NTC")
+tb_ntc %>% gsa(batch, hr_sense, hr_multi)
+```
+
+```{r func_read_multiqc_json}
+read_multiqc_json <- function(tb) {
+  tb_info <- 
+    tb %>% 
+    select(wd, outdir) %>% 
+    distinct()
+  l_multiqc_json <- 
+    purrr::pmap(
+      tb_info,
+      .f = function(wd, outdir) {
+        path(a$pdw, wd, outdir, "multiqc", "multiqc_data", "multiqc_data.json") %>% 
+        jsonlite::fromJSON()
+      }
+    )
+  return(l_multiqc_json)
+}
+
+format_host_removal_info <- function(l) {
+  tb_host_removal <- 
+    purrr::map_dfr(
+      .x = l,
+      .f = function(l_sub) {
+        tb <- 
+          l_sub$report_plot_data$`host_removal_bargraph-1`$datasets[[1]]$data %>% 
+          set_names(nm = c("kept", "discarded")) %>% 
+          as_tibble() %>% 
+          mutate(
+            sample = 
+              l_sub$report_plot_data$`host_removal_bargraph-1`$samples %>%
+              as.character() %>% 
+              str_remove("\\.host_removed"),
+            .before = 1
+          )
+        return(tb)
+      }
+    ) %>% 
+    mutate(
+      all = kept + discarded,
+      pct = kept / all
+    )
+  return(tb_host_removal)
+}
+
+l_multiqc_json <- tb_ntc %>% select(wd, outdir) %>% read_multiqc_json()
+tb_host_removal <- format_host_removal_info(l_multiqc_json)
+
+tb_ntc_removal <- 
+  tb_ntc %>% 
+  left_join(tb_host_removal, by = c("id_in_pipeline" = "sample")) %>% 
+  filter(!is.na(kept))
+```
+
+# 
+
